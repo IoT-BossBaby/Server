@@ -1,180 +1,154 @@
-import redis
-import json
+# Upstash Redis 최적화된 연결 설정
+
 import os
+import json
+import redis
+from redis.exceptions import ConnectionError, TimeoutError, RedisError
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, Any, Optional
+import time
+import ssl
 
 class RedisManager:
     def __init__(self):
-        self.client = None
+        self.redis_client = None
         self.available = False
-        self._connect()
+        self.in_memory_storage = {}
+        self._connect_to_upstash()
     
-    def _connect(self):
-        """Redis 연결"""
-        try:
-            REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
-            REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
-            REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', None)
-            REDIS_URL = os.getenv('REDIS_URL', None)
-            
-            print(f"🔍 Redis 연결 시도...")
-            
-            if REDIS_URL:
-                self.client = redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=10)
-            elif REDIS_HOST and REDIS_HOST != 'localhost':
-                self.client = redis.Redis(
-                    host=REDIS_HOST, port=REDIS_PORT, password=REDIS_PASSWORD,
-                    decode_responses=True, socket_timeout=10
-                )
-            
-            if self.client:
-                self.client.ping()
-                self.available = True
-                print(f"✅ Redis 연결 성공!")
-        except Exception as e:
-            print(f"⚠️ Redis 연결 실패: {e}")
-            self.client = None
+    def _connect_to_upstash(self):
+        """Upstash Redis 연결 (최적화)"""
+        redis_url = os.getenv("REDIS_URL")
+        
+        if not redis_url:
+            print("⚠️ REDIS_URL 환경변수 없음")
             self.available = False
+            return
+        
+        try:
+            print(f"🔍 Upstash Redis 연결 시도...")
+            
+            # Upstash 최적화 설정
+            self.redis_client = redis.from_url(
+                redis_url,
+                socket_connect_timeout=10,     # 연결 타임아웃 늘림
+                socket_timeout=10,             # 읽기 타임아웃 늘림
+                socket_keepalive=True,         # Keep-alive 활성화
+                socket_keepalive_options={},
+                retry_on_timeout=True,         # 타임아웃 시 재시도
+                retry_on_error=[ConnectionError, TimeoutError],  # 특정 오류 시 재시도
+                decode_responses=True,         # 자동 디코딩
+                health_check_interval=60,      # 헬스체크 간격
+                max_connections=3,             # 연결 수 제한
+                
+                # SSL 설정 (Upstash TLS용)
+                ssl_cert_reqs=ssl.CERT_NONE,   # SSL 인증서 검증 안함
+                ssl_check_hostname=False       # 호스트명 검증 안함
+            )
+            
+            # 간단한 연결 테스트
+            result = self.redis_client.ping()
+            if result:
+                self.available = True
+                print("✅ Upstash Redis 연결 성공!")
+                
+                # 연결 정보 출력
+                info = self.redis_client.info('server')
+                redis_version = info.get('redis_version', 'unknown')
+                print(f"📊 Redis 버전: {redis_version}")
+                return
+                
+        except ConnectionError as e:
+            print(f"❌ Upstash 연결 오류: {e}")
+            print("💡 Upstash 데이터베이스가 활성화되어 있는지 확인하세요")
+            
+        except redis.AuthenticationError as e:
+            print(f"❌ Upstash 인증 오류: {e}")
+            print("💡 Redis URL의 패스워드가 올바른지 확인하세요")
+            
+        except TimeoutError as e:
+            print(f"❌ Upstash 타임아웃: {e}")
+            print("💡 네트워크 연결 상태를 확인하세요")
+            
+        except Exception as e:
+            print(f"❌ Upstash 연결 실패: {type(e).__name__} - {e}")
+        
+        # 연결 실패 시 fallback
+        print("📦 메모리 기반 저장소로 fallback")
+        self.available = False
+        self.redis_client = None
     
     def store_esp32_data(self, data: Dict[str, Any]) -> bool:
         """ESP32 데이터 저장"""
-        if not self.available:
-            return False
+        timestamp = datetime.now().isoformat()
+        data_with_timestamp = {**data, "stored_at": timestamp}
         
-        try:
-            timestamp = datetime.now().isoformat()
-            
-            # 현재 상태 저장 (실시간 조회용)
-            self.client.setex("current_esp32_data", 300, json.dumps(data))
-            
-            # 히스토리 저장
-            hour_key = f"esp32_history:{datetime.now().strftime('%Y%m%d_%H')}"
-            self.client.lpush(hour_key, json.dumps(data))
-            self.client.expire(hour_key, 86400 * 7)  # 7일 보관
-            
-            return True
-        except Exception as e:
-            print(f"Redis 저장 실패: {e}")
-            return False
-    
-    def store_image_data(self, image_data: Dict[str, Any]) -> bool:
-        """이미지 데이터 저장"""
-        if not self.available:
-            return False
+        # Redis 시도
+        if self.available and self.redis_client:
+            try:
+                result = self.redis_client.setex(
+                    "current_esp32_data", 
+                    300,  # 5분 TTL
+                    json.dumps(data_with_timestamp, ensure_ascii=False)
+                )
+                if result:
+                    return True
+            except Exception as e:
+                print(f"⚠️ Upstash 저장 실패: {e}")
+                self._handle_connection_error()
         
-        try:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            image_key = f"esp32_image:{timestamp}"
-            
-            # 이미지 데이터 저장 (1시간 보관)
-            self.client.setex(image_key, 3600, json.dumps(image_data))
-            
-            # 최근 이미지 목록 관리
-            self.client.lpush("recent_images", image_key)
-            self.client.ltrim("recent_images", 0, 19)  # 최근 20개만
-            
-            return True
-        except Exception as e:
-            print(f"이미지 저장 실패: {e}")
-            return False
+        # 메모리 fallback
+        self.in_memory_storage["current_esp32_data"] = data_with_timestamp
+        return True
     
     def get_current_status(self) -> Optional[Dict[str, Any]]:
         """현재 상태 조회"""
-        if not self.available:
-            return None
+        # Redis 시도
+        if self.available and self.redis_client:
+            try:
+                data = self.redis_client.get("current_esp32_data")
+                if data:
+                    return json.loads(data)
+            except Exception as e:
+                print(f"⚠️ Upstash 조회 실패: {e}")
+                self._handle_connection_error()
         
-        try:
-            current_data = self.client.get("current_esp32_data")
-            return json.loads(current_data) if current_data else None
-        except Exception as e:
-            print(f"상태 조회 실패: {e}")
-            return None
+        # 메모리 fallback
+        return self.in_memory_storage.get("current_esp32_data")
     
-    def get_recent_images(self, count: int = 5) -> List[Dict[str, Any]]:
-        """최근 이미지들 조회"""
-        if not self.available:
-            return []
-        
-        try:
-            recent_keys = self.client.lrange("recent_images", 0, count - 1)
-            images = []
-            
-            for key in recent_keys:
-                image_data = self.client.get(key)
-                if image_data:
-                    images.append(json.loads(image_data))
-            
-            return images
-        except Exception as e:
-            print(f"이미지 조회 실패: {e}")
-            return []
+    def _handle_connection_error(self):
+        """연결 오류 처리"""
+        self.available = False
+        print("📦 Upstash 연결 끊어짐 - 메모리 모드로 전환")
     
-    def store_command(self, command: Dict[str, Any]) -> bool:
-        """ESP32 명령 저장"""
-        if not self.available:
-            return False
-        
-        try:
-            # ESP32가 읽을 수 있도록 저장
-            self.client.setex("esp32_command", 60, json.dumps(command))
-            self.client.publish("esp32_commands", json.dumps(command))
-            return True
-        except Exception as e:
-            print(f"명령 저장 실패: {e}")
-            return False
+    def test_connection(self):
+        """연결 테스트"""
+        if self.available and self.redis_client:
+            try:
+                result = self.redis_client.ping()
+                return {"status": "connected", "ping": result}
+            except Exception as e:
+                return {"status": "failed", "error": str(e)}
+        else:
+            return {"status": "not_available", "mode": "memory"}
     
-    def publish_alert(self, alert_data: Dict[str, Any]) -> bool:
-        """알림 발행"""
-        if not self.available:
-            return False
+    def get_stats(self):
+        """Redis 통계"""
+        stats = {
+            "available": self.available,
+            "storage_mode": "upstash" if self.available else "memory",
+            "memory_items": len(self.in_memory_storage)
+        }
         
-        try:
-            self.client.publish("baby_alerts", json.dumps(alert_data))
-            return True
-        except Exception as e:
-            print(f"알림 발행 실패: {e}")
-            return False
-    
-    def get_daily_stats(self, date: str = None) -> Dict[str, Any]:
-        """일일 통계"""
-        if not self.available:
-            return {}
-        
-        if not date:
-            date = datetime.now().strftime("%Y%m%d")
-        
-        try:
-            stats = {
-                "date": date,
-                "total_readings": 0,
-                "baby_detected_count": 0,
-                "alerts_count": 0,
-                "temperature_avg": 0,
-                "humidity_avg": 0
-            }
-            
-            # 해당 날짜의 모든 시간대 데이터 수집
-            all_data = []
-            for hour in range(24):
-                hour_key = f"esp32_history:{date}_{hour:02d}"
-                hour_data = self.client.lrange(hour_key, 0, -1)
-                for data_str in hour_data:
-                    all_data.append(json.loads(data_str))
-            
-            if all_data:
-                stats["total_readings"] = len(all_data)
-                stats["baby_detected_count"] = sum(1 for d in all_data if d.get("baby_detected", False))
+        if self.available and self.redis_client:
+            try:
+                info = self.redis_client.info()
+                stats.update({
+                    "redis_version": info.get('redis_version'),
+                    "connected_clients": info.get('connected_clients'),
+                    "used_memory_human": info.get('used_memory_human')
+                })
+            except:
+                pass
                 
-                temps = [d.get("temperature", 0) for d in all_data if d.get("temperature")]
-                humids = [d.get("humidity", 0) for d in all_data if d.get("humidity")]
-                
-                if temps:
-                    stats["temperature_avg"] = round(sum(temps) / len(temps), 1)
-                if humids:
-                    stats["humidity_avg"] = round(sum(humids) / len(humids), 1)
-            
-            return stats
-        except Exception as e:
-            print(f"통계 조회 실패: {e}")
-            return {}
+        return stats
