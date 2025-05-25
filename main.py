@@ -37,15 +37,38 @@ app = FastAPI(
 )
 
 # 매니저들 초기화
+# 🔥 수정: 매니저들을 한 번만 초기화
 if MODULES_AVAILABLE:
-    redis_manager = RedisManager()
-    websocket_manager = WebSocketManager()
-    esp32_handler = ESP32Handler(redis_manager, websocket_manager)
-    image_handler = ImageHandler()
-    
-    print("🍼 Baby Monitor Server 시작")
-    print(f"📊 Redis: {'연결됨' if redis_manager.available else '연결 안됨'}")
-else:
+    try:
+        # Redis 연결 재시도 로직 추가
+        print("🔍 Redis 연결 시도...")
+        redis_manager = RedisManager()
+        
+        # Redis 연결 실패 시 재시도 (Railway 일시적 문제 대응)
+        if not redis_manager.available:
+            print("⚠️ Redis 첫 연결 실패 - 3초 후 재시도...")
+            import time
+            time.sleep(3)
+            redis_manager = RedisManager()  # 재시도
+            
+        if not redis_manager.available:
+            print("⚠️ Redis 연결 실패 - fallback 모드로 실행")
+        
+        websocket_manager = WebSocketManager()
+        esp32_handler = ESP32Handler(redis_manager, websocket_manager)
+        image_handler = ImageHandler()
+        realtime_handler = RealTimeHandler(redis_manager, websocket_manager)
+        
+        print("🍼 Baby Monitor Server 시작")
+        print(f"📊 Redis: {'연결됨' if redis_manager.available else '연결 안됨'}")
+        print("💓 실시간 하트비트 시작")
+        print("💓 실시간 시간 동기화 활성화")
+        
+    except Exception as e:
+        print(f"❌ 모듈 초기화 오류: {e}")
+        MODULES_AVAILABLE = False
+        
+if not MODULES_AVAILABLE:
     # 기본 모드 - 모듈 없이 실행
     class DummyManager:
         def __init__(self):
@@ -58,85 +81,24 @@ else:
     websocket_manager = DummyManager()
     esp32_handler = DummyManager()
     image_handler = DummyManager()
-    
-    print("🍼 Baby Monitor Server 시작 (기본 모드)")
-
-# 기존 매니저 초기화 부분 이후에 추가
-if MODULES_AVAILABLE:
-    redis_manager = RedisManager()
-    websocket_manager = WebSocketManager()
-    esp32_handler = ESP32Handler(redis_manager, websocket_manager)
-    image_handler = ImageHandler()
-    
-    # 🔥 새로 추가: 실시간 핸들러 초기화
-    realtime_handler = RealTimeHandler(redis_manager, websocket_manager)
-    
-    print("🍼 Baby Monitor Server 시작")
-    print(f"📊 Redis: {'연결됨' if redis_manager.available else '연결 안됨'}")
-    print("💓 실시간 시간 동기화 활성화")
-else:
-    # 기본 모드
     realtime_handler = None
+    
     print("🍼 Baby Monitor Server 시작 (기본 모드)")
 
-@app.post("/esp32/sensor")
-async def receive_esp32_sensor_data(request: Request, data: Dict[str, Any]):
-    """ESP32에서 센서 데이터 수신 (온습도, 움직임, 소음 등)"""
-    if not MODULES_AVAILABLE:
-        return {"error": "Modules not available", "data_received": data}
-    
-    try:
-        # 클라이언트 IP 주소 가져오기
-        client_ip = request.client.host
-        
-        print(f"📡 ESP32 센서 데이터 수신 from {client_ip}: {data}")
-        
-        # ESP32 핸들러로 처리
-        result = await esp32_handler.handle_esp32_data(data, client_ip)
-        
-        return {
-            **result,
-            "received_from": client_ip,
-            "endpoint": "esp32_sensor"
-        }
-        
-    except Exception as e:
-        print(f"❌ ESP32 센서 데이터 수신 오류: {e}")
-        raise HTTPException(status_code=500, detail=f"ESP32 sensor data processing failed: {str(e)}")
-
-@app.post("/esp32/image")
-async def receive_esp_eye_image_data(request: Request, data: Dict[str, Any]):
-    """ESP Eye에서 이미지 데이터 수신"""
-    if not MODULES_AVAILABLE:
-        return {"error": "Modules not available", "data_received": {"image_size": len(data.get("image", ""))}}
-    
-    try:
-        # 클라이언트 IP 주소 가져오기
-        client_ip = request.client.host
-        
-        # 이미지 크기 확인 (로그용)
-        image_size = len(data.get("image", ""))
-        print(f"👁️ ESP Eye 이미지 수신 from {client_ip}: {image_size} bytes")
-        
-        # ESP Eye 핸들러로 처리
-        result = await esp32_handler.handle_esp_eye_data(data, client_ip)
-        
-        return {
-            **result,
-            "received_from": client_ip,
-            "endpoint": "esp_eye_image",
-            "image_size": image_size
-        }
-        
-    except Exception as e:
-        print(f"❌ ESP Eye 이미지 데이터 수신 오류: {e}")
-        raise HTTPException(status_code=500, detail=f"ESP Eye image processing failed: {str(e)}")
-
+# 🔥 수정: 통합된 ESP32 데이터 엔드포인트 (중복 제거)
 @app.post("/esp32/data")
 async def receive_esp32_data(request: Request, data: Dict[str, Any]):
     """ESP32에서 통합 데이터 수신 (센서 + 이미지 혼합 가능)"""
     if not MODULES_AVAILABLE:
-        return {"error": "Modules not available", "data_received": data}
+        return {
+            "status": "fallback_mode",
+            "message": "Modules not available - running in basic mode",
+            "data_received": {
+                "size": len(str(data)),
+                "has_image": "image" in data,
+                "has_sensor": any(key in data for key in ["temperature", "humidity", "movement", "sound"])
+            }
+        }
     
     try:
         client_ip = request.client.host
@@ -145,40 +107,107 @@ async def receive_esp32_data(request: Request, data: Dict[str, Any]):
         has_image = "image" in data and data["image"]
         has_sensor = any(key in data for key in ["temperature", "humidity", "movement", "sound"])
         
-        print(f"📡 ESP32 통합 데이터 수신 from {client_ip}: 이미지={has_image}, 센서={has_sensor}")
+        print(f"📡 ESP32 데이터 수신 from {client_ip}: 이미지={has_image}, 센서={has_sensor}")
         
         results = []
         
         # 이미지 데이터 처리
         if has_image:
-            image_result = await esp32_handler.handle_esp_eye_data(data, client_ip)
-            results.append({"type": "image", "result": image_result})
+            print(f"👁️ 이미지 데이터 처리 중... ({len(data.get('image', ''))} bytes)")
+            try:
+                image_result = await esp32_handler.handle_esp_eye_data(data, client_ip)
+                results.append({"type": "image", "result": image_result})
+            except Exception as img_error:
+                print(f"❌ 이미지 처리 오류: {img_error}")
+                results.append({"type": "image", "result": {"error": str(img_error)}})
         
         # 센서 데이터 처리
         if has_sensor:
-            sensor_result = await esp32_handler.handle_esp32_data(data, client_ip)
-            results.append({"type": "sensor", "result": sensor_result})
+            print(f"📊 센서 데이터 처리 중...")
+            try:
+                sensor_result = await esp32_handler.handle_esp32_data(data, client_ip)
+                results.append({"type": "sensor", "result": sensor_result})
+            except Exception as sensor_error:
+                print(f"❌ 센서 처리 오류: {sensor_error}")
+                results.append({"type": "sensor", "result": {"error": str(sensor_error)}})
         
         # 둘 다 없으면 기본 처리
         if not has_image and not has_sensor:
-            default_result = await esp32_handler.handle_esp32_data(data, client_ip)
-            results.append({"type": "default", "result": default_result})
+            try:
+                default_result = await esp32_handler.handle_esp32_data(data, client_ip)
+                results.append({"type": "default", "result": default_result})
+            except Exception as default_error:
+                print(f"❌ 기본 처리 오류: {default_error}")
+                results.append({"type": "default", "result": {"error": str(default_error)}})
+        
+        # 🔥 실시간 브로드캐스트 (WebSocket)
+        if websocket_manager.active_connections:
+            try:
+                broadcast_data = {
+                    "type": "new_data",
+                    "source": "esp32",
+                    "data": data,
+                    "client_ip": client_ip,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+                await websocket_manager.broadcast_to_apps(broadcast_data)
+                print(f"📡 {len(websocket_manager.active_connections)}개 앱에 브로드캐스트 완료")
+            except Exception as broadcast_error:
+                print(f"⚠️ 브로드캐스트 오류: {broadcast_error}")
         
         return {
             "status": "success",
-            "message": "ESP32 통합 데이터 처리 완료",
+            "message": "ESP32 데이터 처리 완료",
             "received_from": client_ip,
             "processed_types": [r["type"] for r in results],
             "results": results,
+            "broadcast_sent": len(websocket_manager.active_connections) if hasattr(websocket_manager, 'active_connections') else 0,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
         
     except Exception as e:
-        print(f"❌ ESP32 통합 데이터 수신 오류: {e}")
+        print(f"❌ ESP32 데이터 수신 총 오류: {e}")
         raise HTTPException(status_code=500, detail=f"ESP32 data processing failed: {str(e)}")
 
+# 🔥 수정: 개별 엔드포인트들 (호환성 유지)
+@app.post("/esp32/sensor")
+async def receive_esp32_sensor_data(request: Request, data: Dict[str, Any]):
+    """ESP32에서 센서 데이터만 수신 (호환성 유지)"""
+    print(f"📡 센서 전용 엔드포인트 호출 - /esp32/data로 리다이렉트")
+    return await receive_esp32_data(request, data)
 
-# 🔥 새로 추가: 실시간 시간 정보 API
+@app.post("/esp32/image")
+async def receive_esp_eye_image_data(request: Request, data: Dict[str, Any]):
+    """ESP Eye에서 이미지 데이터만 수신 (호환성 유지)"""
+    print(f"👁️ 이미지 전용 엔드포인트 호출 - /esp32/data로 리다이렉트")
+    return await receive_esp32_data(request, data)
+
+@app.post("/esp32/command")
+async def send_command_to_esp32(command_data: Dict[str, Any]):
+    """ESP32에 WiFi로 명령 전송"""
+    if not MODULES_AVAILABLE:
+        return {
+            "status": "fallback_mode",
+            "message": "Modules not available", 
+            "command": command_data
+        }
+    
+    try:
+        success = await esp32_handler.send_command_to_esp32(command_data)
+        
+        return {
+            "status": "success" if success else "failed",
+            "message": f"Command {'sent to' if success else 'failed to send to'} ESP32",
+            "command": command_data.get("command"),
+            "timestamp": datetime.now().isoformat(),
+            "esp32_ip": esp32_handler.esp32_ip if hasattr(esp32_handler, 'esp32_ip') else None
+        }
+        
+    except Exception as e:
+        print(f"❌ ESP32 명령 전송 오류: {e}")
+        raise HTTPException(status_code=500, detail=f"Command sending failed: {str(e)}")
+
+# 🔥 수정: 실시간 시간 정보 API
 @app.get("/app/time")
 def get_time_info():
     """앱에서 서버 시간 정보 조회 (한국 시간)"""
@@ -194,16 +223,8 @@ def get_time_info():
             "local_time": current_kst.strftime("%Y-%m-%d %H:%M:%S"),
             "formatted_time": current_kst.strftime("%Y년 %m월 %d일 %H:%M:%S"),
             "timezone": "Asia/Seoul",
-            "message": "실시간 핸들러 비활성화"
+            "message": "실시간 핸들러 비활성화" if not realtime_handler else "정상"
         }
-
-# 🔥 새로 추가: 앱 종료 시 정리
-@app.on_event("shutdown")
-async def shutdown_event():
-    """서버 종료 시 정리 작업"""
-    if 'realtime_handler' in globals() and realtime_handler:
-        realtime_handler.stop_heartbeat()
-        print("💓 실시간 하트비트 중지됨")
 
 @app.get("/")
 def read_root():
@@ -214,17 +235,21 @@ def read_root():
         "version": "2.0.0",
         "modules_available": MODULES_AVAILABLE,
         "status": {
-            "redis": "connected" if redis_manager.available else "disconnected", 
-            "active_app_connections": len(websocket_manager.active_connections),
-            "esp32": esp32_handler.esp32_status if hasattr(esp32_handler, 'esp32_status') else "unknown"
+            "redis": "connected" if (MODULES_AVAILABLE and redis_manager.available) else "disconnected", 
+            "active_app_connections": len(websocket_manager.active_connections) if (MODULES_AVAILABLE and hasattr(websocket_manager, 'active_connections')) else 0,
+            "esp32": esp32_handler.esp32_status if (MODULES_AVAILABLE and hasattr(esp32_handler, 'esp32_status')) else "unknown"
         },
         "endpoints": {
-            "esp32_data": "/esp32/data (POST)",
-            "esp32_command": "/esp32/command (POST)", 
+            "esp32_data": "/esp32/data (POST) - 통합 데이터 수신",
+            "esp32_sensor": "/esp32/sensor (POST) - 센서 데이터",
+            "esp32_image": "/esp32/image (POST) - 이미지 데이터",
+            "esp32_command": "/esp32/command (POST) - ESP32 명령", 
             "app_websocket": "/app/stream (WebSocket)",
             "current_status": "/status",
-            "latest_image": "/images/latest",
-            "daily_stats": "/stats/daily"
+            "time_info": "/app/time",
+            "health_check": "/health",
+            "test_page": "/test",
+            "dashboard": "/dashboard"
         },
         "timestamp": datetime.now().isoformat()
     }
@@ -235,10 +260,77 @@ def health_check():
     return {
         "status": "healthy",
         "modules_available": MODULES_AVAILABLE,
-        "redis": redis_manager.available if MODULES_AVAILABLE else False,
-        "esp32_connected": esp32_handler.esp32_status == "connected" if hasattr(esp32_handler, 'esp32_status') else False,
-        "active_connections": len(websocket_manager.active_connections) if MODULES_AVAILABLE else 0,
+        "redis": (MODULES_AVAILABLE and redis_manager.available) if MODULES_AVAILABLE else False,
+        "esp32_connected": (esp32_handler.esp32_status == "connected") if (MODULES_AVAILABLE and hasattr(esp32_handler, 'esp32_status')) else False,
+        "active_connections": len(websocket_manager.active_connections) if (MODULES_AVAILABLE and hasattr(websocket_manager, 'active_connections')) else 0,
         "timestamp": datetime.now().isoformat()
+    }
+
+# 🔥 수정: 앱 종료 시 정리
+@app.on_event("shutdown")
+async def shutdown_event():
+    """서버 종료 시 정리 작업"""
+    if realtime_handler:
+        try:
+            realtime_handler.stop_heartbeat()
+            print("💓 실시간 하트비트 중지됨")
+        except Exception as e:
+            print(f"⚠️ 하트비트 중지 오류: {e}")
+
+# 🔥 수정: 앱 API 핸들러 초기화
+if MODULES_AVAILABLE:
+    try:
+        app_api_handler = AppApiHandler(
+            redis_manager=redis_manager,
+            websocket_manager=websocket_manager,
+            esp32_handler=esp32_handler,
+            image_handler=image_handler
+        )
+        
+        # 앱 API 라우터를 메인 앱에 포함
+        app.include_router(app_api_handler.get_router())
+        print("📱 앱 API 핸들러 초기화 완료")
+        
+    except Exception as e:
+        print(f"⚠️ 앱 API 핸들러 초기화 실패: {e}")
+        app_api_handler = None
+else:
+    app_api_handler = None
+    print("📱 앱 API 핸들러 비활성화 (모듈 없음)")
+
+# 🔥 새로 추가: 상태 엔드포인트
+@app.get("/status")
+def get_detailed_status():
+    """상세 서버 상태 정보"""
+    return {
+        "server": {
+            "status": "running",
+            "version": "2.0.0",
+            "modules_available": MODULES_AVAILABLE,
+            "startup_time": datetime.now().isoformat()
+        },
+        "redis": {
+            "available": (MODULES_AVAILABLE and redis_manager.available) if MODULES_AVAILABLE else False,
+            "status": "connected" if (MODULES_AVAILABLE and redis_manager.available) else "disconnected"
+        },
+        "esp32": {
+            "status": esp32_handler.esp32_status if (MODULES_AVAILABLE and hasattr(esp32_handler, 'esp32_status')) else "unknown",
+            "ip": esp32_handler.esp32_ip if (MODULES_AVAILABLE and hasattr(esp32_handler, 'esp32_ip')) else None
+        },
+        "websocket": {
+            "active_connections": len(websocket_manager.active_connections) if (MODULES_AVAILABLE and hasattr(websocket_manager, 'active_connections')) else 0
+        },
+        "timestamp": datetime.now().isoformat()
+    }
+
+# 🔥 간단한 테스트 엔드포인트
+@app.get("/ping")
+def ping():
+    """간단한 ping 엔드포인트"""
+    return {
+        "message": "pong", 
+        "timestamp": datetime.now().isoformat(),
+        "server": "Baby Monitor v2.0.0"
     }
 
 # =========================
@@ -1270,4 +1362,13 @@ async def receive_esp32_data(data: Dict[str, Any]):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
+
+    # Railway에서 PORT가 6379로 잘못 설정된 경우 방지
+    if port == 6379:
+        print("⚠️ PORT가 Redis 포트(6379)로 설정됨 - 8000으로 변경")
+        port = 8000
+    
+    print(f"🚀 서버 시작 중... 포트 {port}")
+    print(f"📊 모듈 상태: {'사용 가능' if MODULES_AVAILABLE else '기본 모드'}")
+    
     uvicorn.run(app, host="0.0.0.0", port=port)
