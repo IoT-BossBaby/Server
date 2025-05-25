@@ -1,0 +1,22 @@
+# 기본 웹 서버
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+redis==5.0.1
+websockets==12.0
+pytz==2023.3
+python-multipart==0.0.6
+aiofiles==23.2.1
+
+# 이미지 처리
+pillow==10.0.1
+numpy==1.24.3
+
+# HTTP 클라이언트 (ESP32 통신용)
+aiohttp==3.9.1
+
+# ML 라이브러리 (선택사항 - 용량 크므로 단계별 추가)
+# torch==2.1.0
+# torchvision==0.16.0
+# ultralytics==8.0.196
+# opencv-python-headless==4.8.1.78
+# mediapipe==0.10.7
