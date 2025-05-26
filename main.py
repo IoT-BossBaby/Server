@@ -24,6 +24,7 @@ try:
     from websocket_manager import WebSocketManager
     from image_handler import ImageHandler
     MODULES_AVAILABLE = True
+    print("✅ 모든 모듈 import 성공")
 except ImportError as e:
     print(f"⚠️ 모듈 import 실패: {e}")
     print("📝 기본 모드로 실행됩니다")
@@ -36,7 +37,7 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# 매니저들 초기화
+# 🔥 수정: 매니저들을 한 번만 초기화
 if MODULES_AVAILABLE:
     try:
         # Redis 연결 재시도 로직 추가

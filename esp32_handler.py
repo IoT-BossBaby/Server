@@ -65,21 +65,7 @@ class ESP32Handler:
             # 환경 센서 데이터
             "temperature": float(raw_data.get("temperature", 0.0)),
             "humidity": float(raw_data.get("humidity", 0.0)),
-            "playLullaby": str(raw_data.get("playLullaby", "")).lower() == "true",
-            
-            # 움직임 감지
-            "movement_detected": raw_data.get("movement", False),
-            "motion_level": float(raw_data.get("motion_level", 0.0)),
-            
-            # 소음 레벨
-            "sound_level": float(raw_data.get("sound", 0.0)),
-            "noise_detected": raw_data.get("noise_detected", False),
-            
-            # 시스템 상태
-            "battery_level": raw_data.get("battery", None),
-            "wifi_signal": raw_data.get("wifi_signal", None),
-            "memory_free": raw_data.get("memory_free", None),
-            "uptime": raw_data.get("uptime", None),
+            "playLullaby": str(raw_data.get("playLullaby", "")).lower() == "true"
         }
         
         # 환경 상태 분석
@@ -111,32 +97,6 @@ class ESP32Handler:
                 alert_factors.append(f"부적절한 습도: {processed_data['humidity']}%")
                 alert_score += 1
         
-        # 움직임/소음 감지
-        if processed_data["movement_detected"]:
-            alert_factors.append("움직임 감지됨")
-            alert_score += 1
-        
-        if processed_data["noise_detected"]:
-            alert_factors.append("소음 감지됨")
-            alert_score += 1
-        
-        # 시스템 경고
-        if processed_data.get("battery_level") and processed_data["battery_level"] < 20:
-            alert_factors.append("배터리 부족")
-            alert_score += 1
-        
-        # 알림 레벨 결정
-        if alert_score >= 3:
-            alert_level = "high"
-        elif alert_score >= 1:
-            alert_level = "medium"
-        else:
-            alert_level = "low"
-        
-        processed_data["alert_factors"] = alert_factors
-        processed_data["alert_score"] = alert_score
-        processed_data["alert_level"] = alert_level
-        
         return processed_data
     
     def process_esp_eye_data(self, raw_data: Dict[str, Any], client_ip: str) -> Dict[str, Any]:
@@ -158,46 +118,22 @@ class ESP32Handler:
             "image_base64": raw_data.get("image", ""),
             "image_size": len(raw_data.get("image", "")),
             
-            # 객체 탐지 결과 (ESP Eye에서 처리한 경우)
-            "baby_detected": raw_data.get("baby_detected", False),
-            "detection_confidence": float(raw_data.get("confidence", 0.0)),
-            "face_detected": raw_data.get("face_detected", False),
-            "face_count": int(raw_data.get("face_count", 0)),
-            
             # 이미지 메타데이터
             "image_width": raw_data.get("width", 0),
             "image_height": raw_data.get("height", 0),
             "image_format": raw_data.get("format", "jpeg"),
             "compression_quality": raw_data.get("quality", 80),
-            
-            # 시스템 상태
-            "battery_level": raw_data.get("battery", None),
-            "wifi_signal": raw_data.get("wifi_signal", None),
-            "memory_free": raw_data.get("memory_free", None),
-            "camera_status": raw_data.get("camera_status", "ok"),
         }
         
         # 비전 분석
         vision_alerts = []
         vision_score = 0
         
-        # 아기 감지 상태 분석
-        if not processed_data["baby_detected"]:
-            vision_alerts.append("아기가 감지되지 않음")
-            vision_score += 2
-        elif processed_data["detection_confidence"] < 0.7:
-            vision_alerts.append("낮은 감지 신뢰도")
-            vision_score += 1
-        
         # 이미지 품질 검사
         if processed_data["image_size"] < 1000:  # 너무 작은 이미지
             vision_alerts.append("이미지 품질 불량")
             vision_score += 1
         
-        # 시스템 상태 검사
-        if processed_data.get("battery_level") and processed_data["battery_level"] < 15:
-            vision_alerts.append("ESP Eye 배터리 부족")
-            vision_score += 2
         
         if processed_data["camera_status"] != "ok":
             vision_alerts.append("카메라 오류")
@@ -225,7 +161,7 @@ class ESP32Handler:
             processed_data = self.process_esp32_sensor_data(raw_data, client_ip)
             
             print(f"📡 ESP32 데이터: 온도={processed_data['temperature']}°C, "
-                  f"습도={processed_data['humidity']}%, 알림레벨={processed_data['alert_level']}")
+                  f"습도={processed_data['humidity']}%")
             
             # 2. Redis 저장
             redis_stored = False
