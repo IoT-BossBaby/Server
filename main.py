@@ -8,6 +8,9 @@ from app_api_handler import AppApiHandler
 from realtime_handler import RealTimeHandler
 from datetime import datetime, timezone, timedelta
 import pytz
+import queue  
+import threading  
+import time 
 
 KST = pytz.timezone('Asia/Seoul')
 
@@ -861,7 +864,7 @@ void loop() {{
     """
     
     return HTMLResponse(content=html_content)
-    
+
 @app.post("/esp32/command")
 async def send_command_to_esp32(command_data: Dict[str, Any]):
     """ESP32에 WiFi로 명령 전송"""
