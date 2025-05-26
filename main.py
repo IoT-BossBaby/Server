@@ -317,6 +317,63 @@ else:
     app_api_handler = None
     print("📱 앱 API 핸들러 비활성화 (모듈 없음)")
 
+# 🔥 새로 추가: 이미지 관련 API 엔드포인트
+@app.get("/images/latest")
+async def get_latest_image():
+    """최신 이미지 조회"""
+    if not MODULES_AVAILABLE:
+        return {"error": "Modules not available"}
+    
+    try:
+        # Redis에서 최신 이미지 데이터 가져오기
+        if redis_manager and hasattr(redis_manager, 'get_latest_image'):
+            image_data = redis_manager.get_latest_image()
+            if image_data:
+                return {
+                    "status": "success",
+                    "has_image": True,
+                    "image_base64": image_data.get("image_base64", ""),
+                    "timestamp": image_data.get("timestamp"),
+                    "metadata": image_data.get("metadata", {}),
+                    "size": len(image_data.get("image_base64", ""))
+                }
+        
+        return {
+            "status": "no_image",
+            "has_image": False,
+            "message": "최신 이미지가 없습니다"
+        }
+        
+    except Exception as e:
+        print(f"❌ 최신 이미지 조회 오류: {e}")
+        return {
+            "status": "error",
+            "has_image": False,
+            "message": f"이미지 조회 실패: {str(e)}"
+        }
+
+@app.get("/images/latest/data")
+async def get_latest_image_data():
+    """최신 이미지 데이터만 (base64)"""
+    if not MODULES_AVAILABLE:
+        return {"error": "Modules not available"}
+    
+    try:
+        if redis_manager and hasattr(redis_manager, 'get_latest_image'):
+            image_data = redis_manager.get_latest_image()
+            if image_data and image_data.get("image_base64"):
+                return {
+                    "image": image_data["image_base64"],
+                    "timestamp": image_data.get("timestamp"),
+                    "format": image_data.get("metadata", {}).get("format", "jpeg")
+                }
+        
+        return {"image": None, "timestamp": None}
+        
+    except Exception as e:
+        print(f"❌ 이미지 데이터 조회 오류: {e}")
+        return {"image": None, "error": str(e)}
+
 # 🔥 새로 추가: 상태 엔드포인트
 @app.get("/status")
 def get_detailed_status():
@@ -747,14 +804,22 @@ def baby_monitor_dashboard():
                                 </h5>
                             </div>
                             <div class="card-body p-0">
-                                <div class="video-container">
-                                    <div class="text-center text-white">
+                                <div class="video-container" id="videoContainer">
+                                    <div class="text-center text-white" id="noImageView">
                                         <i class="bi bi-camera baby-icon mb-3"></i>
                                         <h5>실시간 영상 스트림</h5>
                                         <p class="mb-3">ESP32-CAM 연결 대기 중...</p>
                                         <button class="btn btn-outline-light" onclick="requestLatestImage()">
                                             <i class="bi bi-image"></i> 최신 이미지 가져오기
                                         </button>
+                                    </div>
+    
+                                    <!-- 🔥 새로 추가: 이미지 표시 영역 -->
+                                    <div id="imageView" style="display: none; width: 100%; height: 100%;">
+                                        <img id="latestImage" src="" alt="최신 이미지" style="width: 100%; height: 100%; object-fit: contain; border-radius: 15px;">
+                                        <div style="position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 5px 10px; border-radius: 10px; font-size: 12px;">
+                                            <span id="imageTimestamp">--:--</span>
+                                        </div>
                                     </div>
                                 </div>
                                 
@@ -988,12 +1053,74 @@ def baby_monitor_dashboard():
         
         <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
         <script>
+            // 🔥 이미지 관련 변수들 추가
             let autoRefreshInterval;
-            
+            let imageRefreshInterval;
+            let lastImageTimestamp = null;
+    
             function refreshData() {{
                 window.location.reload();
             }}
+    
+            // 🔥 새로운 이미지 함수들
+            async function requestLatestImage() {{
+                try {{
+                    console.log('최신 이미지 요청 중...');
             
+                    const response = await fetch('/images/latest');
+                    const data = await response.json();
+            
+                    if (data.status === 'success' && data.has_image) {{
+                        displayImage(data.image_base64, data.timestamp);
+                        console.log('이미지 로드 성공:', data.size + ' bytes');
+                    }} else {{
+                        console.log('이미지 없음:', data.message);
+                        showNoImageView();
+                    }}
+            
+                }} catch (error) {{
+                    console.error('이미지 요청 실패:', error);
+                    showNoImageView();
+                }}
+            }}
+    
+            function displayImage(base64Data, timestamp) {{
+                const imageView = document.getElementById('imageView');
+                const noImageView = document.getElementById('noImageView');
+                const latestImage = document.getElementById('latestImage');
+                const timestampElement = document.getElementById('imageTimestamp');
+        
+                // base64 데이터를 이미지로 설정
+                latestImage.src = 'data:image/jpeg;base64,' + base64Data;
+        
+                // 타임스탬프 설정
+                if (timestamp) {{
+                    const date = new Date(timestamp);
+                    timestampElement.textContent = date.toLocaleTimeString();
+                    lastImageTimestamp = timestamp;
+                }}
+        
+                // 뷰 전환
+                noImageView.style.display = 'none';
+                imageView.style.display = 'block';
+            }}
+    
+            function showNoImageView() {{
+                const imageView = document.getElementById('imageView');
+                const noImageView = document.getElementById('noImageView');
+        
+                imageView.style.display = 'none';
+                noImageView.style.display = 'block';
+            }}
+    
+            // 🔥 자동 이미지 새로고침
+            function setupImageAutoRefresh() {{
+                // 5초마다 새 이미지 확인
+                imageRefreshInterval = setInterval(async () => {{
+                    await requestLatestImage();
+                }}, 5000);
+            }}
+    
             function playLullaby() {{
                 fetch('/esp32/command', {{
                     method: 'POST',
@@ -1012,27 +1139,29 @@ def baby_monitor_dashboard():
             function sendAlert() {{
                 alert('알림이 모든 연결된 앱으로 전송되었습니다!');
             }}
-            
-            function requestLatestImage() {{
-                // 최신 이미지 요청 로직
-                alert('최신 이미지를 요청했습니다. ESP32에서 응답을 기다리는 중...');
-            }}
-            
-            // 자동 새로고침 설정
+    
+            // 🔥 수정된 자동 새로고침 설정
             function setupAutoRefresh() {{
                 const checkbox = document.getElementById('autoRefresh');
-                
+        
                 if (checkbox.checked) {{
                     autoRefreshInterval = setInterval(() => {{
                         refreshData();
                     }}, 10000); // 10초마다 새로고침
+            
+                    // 이미지 자동 새로고침도 시작
+                    setupImageAutoRefresh();
                 }} else {{
                     clearInterval(autoRefreshInterval);
+                    clearInterval(imageRefreshInterval);
                 }}
             }}
-            
+    
             document.getElementById('autoRefresh').addEventListener('change', setupAutoRefresh);
-            
+    
+            // 🔥 페이지 로드시 이미지 요청 추가
+            // 첫 이미지 로드
+            requestLatestImage();
             // 페이지 로드시 자동 새로고침 시작
             setupAutoRefresh();
         </script>
