@@ -100,67 +100,67 @@ class ESP32Handler:
         return processed_data
     
     def process_esp_eye_data(self, raw_data: Dict[str, Any], client_ip: str) -> Dict[str, Any]:
-    """ESP Eye 이미지 데이터 처리 (단순화 버전)"""
-    
-    # 디바이스 상태 업데이트
-    self.update_device_status("esp_eye", client_ip)
-    
-    timestamp = get_korea_time().isoformat()
-    
-    # ESP Eye 데이터 정규화 (이미지만)
-    processed_data = {
-        "device_type": "esp_eye",
-        "timestamp": timestamp,
-        "esp_eye_ip": client_ip,
+        """ESP Eye 이미지 데이터 처리 (단순화 버전)"""
         
-        # 이미지 데이터
-        "has_image": "image" in raw_data and raw_data["image"],
-        "image_base64": raw_data.get("image", ""),
-        "image_size": len(raw_data.get("image", "")),
+        # 디바이스 상태 업데이트
+        self.update_device_status("esp_eye", client_ip)
         
-        # 이미지 메타데이터 (기본값 설정)
-        "image_width": raw_data.get("width", 640),  # 기본 해상도
-        "image_height": raw_data.get("height", 480),
-        "image_format": raw_data.get("format", "jpeg"),
-        "compression_quality": raw_data.get("quality", 80),
+        timestamp = get_korea_time().isoformat()
         
-        # 🔥 아기 감지 관련 필드 제거 또는 기본값 설정
-        "baby_detected": False,  # ESP Eye에서 감지 안 함
-        "detection_confidence": 0.0,
-        "face_detected": False,
-        "face_count": 0,
-    }
-    
-    # 🔥 단순한 품질 검사만
-    vision_alerts = []
-    vision_score = 0
-    
-    # 이미지 크기 검사
-    if processed_data["image_size"] < 1000:
-        vision_alerts.append("이미지 크기가 작음")
-        vision_score += 1
-    elif processed_data["image_size"] > 100000:  # 100KB 초과
-        vision_alerts.append("이미지 크기가 큼")
-        vision_score += 1
-    
-    # 이미지 없음
-    if not processed_data["has_image"]:
-        vision_alerts.append("이미지 없음")
-        vision_score += 2
-    
-    # 알림 레벨 결정 (단순화)
-    if vision_score >= 2:
-        alert_level = "medium"
-    elif vision_score >= 1:
-        alert_level = "low"
-    else:
-        alert_level = "normal"
-    
-    processed_data["vision_alerts"] = vision_alerts
-    processed_data["vision_score"] = vision_score
-    processed_data["alert_level"] = alert_level
-    
-    return processed_data
+        # ESP Eye 데이터 정규화 (이미지만)
+        processed_data = {
+            "device_type": "esp_eye",
+            "timestamp": timestamp,
+            "esp_eye_ip": client_ip,
+            
+            # 이미지 데이터
+            "has_image": "image" in raw_data and raw_data["image"],
+            "image_base64": raw_data.get("image", ""),
+            "image_size": len(raw_data.get("image", "")),
+            
+            # 이미지 메타데이터 (기본값 설정)
+            "image_width": raw_data.get("width", 640),  # 기본 해상도
+            "image_height": raw_data.get("height", 480),
+            "image_format": raw_data.get("format", "jpeg"),
+            "compression_quality": raw_data.get("quality", 80),
+            
+            # 아기 감지 관련 필드 (기본값)
+            "baby_detected": False,
+            "detection_confidence": 0.0,
+            "face_detected": False,
+            "face_count": 0,
+        }
+        
+        # 단순한 품질 검사만
+        vision_alerts = []
+        vision_score = 0
+        
+        # 이미지 크기 검사
+        if processed_data["image_size"] < 1000:
+            vision_alerts.append("이미지 크기가 작음")
+            vision_score += 1
+        elif processed_data["image_size"] > 100000:  # 100KB 초과
+            vision_alerts.append("이미지 크기가 큼")
+            vision_score += 1
+        
+        # 이미지 없음
+        if not processed_data["has_image"]:
+            vision_alerts.append("이미지 없음")
+            vision_score += 2
+        
+        # 알림 레벨 결정 (단순화)
+        if vision_score >= 2:
+            alert_level = "medium"
+        elif vision_score >= 1:
+            alert_level = "low"
+        else:
+            alert_level = "normal"
+        
+        processed_data["vision_alerts"] = vision_alerts
+        processed_data["vision_score"] = vision_score
+        processed_data["alert_level"] = alert_level
+        
+        return processed_data
 
 async def handle_esp_eye_data(self, raw_data: Dict[str, Any], client_ip: str = "unknown") -> Dict[str, Any]:
     """ESP Eye 이미지 데이터 처리 파이프라인 (단순화)"""
