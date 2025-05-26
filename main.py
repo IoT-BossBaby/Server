@@ -37,7 +37,6 @@ app = FastAPI(
 )
 
 # 매니저들 초기화
-# 🔥 수정: 매니저들을 한 번만 초기화
 if MODULES_AVAILABLE:
     try:
         # Redis 연결 재시도 로직 추가
@@ -324,14 +323,27 @@ def get_detailed_status():
     }
 
 # 🔥 간단한 테스트 엔드포인트
-@app.get("/ping")
-def ping():
-    """간단한 ping 엔드포인트"""
-    return {
-        "message": "pong", 
-        "timestamp": datetime.now().isoformat(),
-        "server": "Baby Monitor v2.0.0"
-    }
+# 🔥 Redis 수동 재연결 엔드포인트
+@app.post("/admin/redis/reconnect")
+def reconnect_redis():
+    """Redis 수동 재연결 시도"""
+    if not MODULES_AVAILABLE:
+        return {"error": "Modules not available"}
+    
+    try:
+        success = redis_manager.reconnect()
+        return {
+            "status": "success" if success else "failed",
+            "redis_available": redis_manager.available,
+            "message": "Redis 재연결 성공" if success else "Redis 재연결 실패",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"재연결 시도 중 오류: {e}",
+            "timestamp": datetime.now().isoformat()
+        }
 
 # =========================
 # ESP32 관련 엔드포인트
