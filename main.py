@@ -63,6 +63,13 @@ if MODULES_AVAILABLE:
         esp32_handler = ESP32Handler(redis_manager, websocket_manager)
         image_handler = ImageHandler()
         realtime_handler = RealTimeHandler(redis_manager, websocket_manager)
+        redis_manager = RedisManager()
+        
+        # 🔥 MJPEG 매니저 초기화
+        mjpeg_manager = MJPEGStreamManager()
+        
+        print("🍼 Baby Monitor Server 시작")
+        print("🎥 MJPEG 스트리밍 준비 완료")
         
         print("🍼 Baby Monitor Server 시작")
         print(f"📊 Redis: {'연결됨' if redis_manager.available else '연결 안됨'}")
@@ -82,6 +89,19 @@ if not MODULES_AVAILABLE:
             self.esp32_status = "disconnected"
             self.esp32_ip = None
     
+    class DummyMJPEGManager:
+        def __init__(self):
+            self.stream_stats = {"viewers": 0, "frame_count": 0, "esp_eye_connected": False}
+        def get_stats(self):
+            return self.stream_stats
+        def broadcast_frame(self, data):
+            pass
+        def add_viewer(self):
+            return None
+        def remove_viewer(self, q):
+            pass
+    
+    mjpeg_manager = DummyMJPEGManager()
     redis_manager = DummyManager()
     websocket_manager = DummyManager()
     esp32_handler = DummyManager()
@@ -94,7 +114,7 @@ if not MODULES_AVAILABLE:
 class MJPEGStreamManager:
     def __init__(self):
         self.active_streams: List[queue.Queue] = []
-        self.latest_frame: bytes = None  # 🔥 최신 프레임 저장
+        self.latest_frame: bytes = None
         self.stream_stats = {
             "viewers": 0,
             "frame_count": 0,
@@ -107,12 +127,12 @@ class MJPEGStreamManager:
     def add_viewer(self) -> queue.Queue:
         """새로운 시청자 추가"""
         with self.lock:
-            frame_queue = queue.Queue(maxsize=10)  # 🔥 버퍼 크기 증가
+            frame_queue = queue.Queue(maxsize=10)
             self.active_streams.append(frame_queue)
             self.stream_stats["viewers"] = len(self.active_streams)
             print(f"🔗 새 시청자 연결됨 (총 {self.stream_stats['viewers']}명)")
             
-            # 🔥 최신 프레임이 있으면 즉시 전송
+            # 최신 프레임이 있으면 즉시 전송
             if self.latest_frame:
                 try:
                     mjpeg_frame = self._create_mjpeg_frame(self.latest_frame)
@@ -131,15 +151,15 @@ class MJPEGStreamManager:
                 print(f"❌ 시청자 연결 해제됨 (총 {self.stream_stats['viewers']}명)")
     
     def _create_mjpeg_frame(self, frame_data: bytes) -> bytes:
-        """🔥 올바른 MJPEG 프레임 형식 생성"""
-        # MJPEG 표준 형식에 맞춰 프레임 구성
-        mjpeg_frame = (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n"
-            f"Content-Length: {len(frame_data)}\r\n\r\n".encode() +
-            frame_data +
-            b"\r\n"
-        )
+        """🔥 올바른 MJPEG 프레임 형식 생성 (Bytes 오류 수정)"""
+        # 🔥 수정: 모든 부분을 bytes로 처리
+        boundary = b"--frame\r\n"
+        content_type = b"Content-Type: image/jpeg\r\n"
+        content_length = f"Content-Length: {len(frame_data)}\r\n\r\n".encode('utf-8')
+        frame_end = b"\r\n"
+        
+        # bytes 객체들만 연결
+        mjpeg_frame = boundary + content_type + content_length + frame_data + frame_end
         return mjpeg_frame
     
     def broadcast_frame(self, frame_data: bytes):
@@ -148,7 +168,7 @@ class MJPEGStreamManager:
             return
             
         with self.lock:
-            # 🔥 최신 프레임 저장
+            # 최신 프레임 저장
             self.latest_frame = frame_data
             self.stream_stats["frame_count"] += 1
             self.stream_stats["last_frame_time"] = time.time()
@@ -574,21 +594,21 @@ async def receive_mjpeg_stream(request: Request):
         if MODULES_AVAILABLE and hasattr(esp32_handler, 'update_device_status'):
             esp32_handler.update_device_status("esp_eye", client_ip)
         
-        # 🔥 요청 본문 읽기
+        # 요청 본문 읽기
         frame_data = await request.body()
         
         if not frame_data:
             print("⚠️ 빈 프레임 데이터")
             return JSONResponse({"status": "error", "message": "Empty frame data"})
         
-        # 🔥 JPEG 헤더 확인
+        # JPEG 헤더 확인
         if len(frame_data) < 2 or frame_data[0] != 0xFF or frame_data[1] != 0xD8:
             print(f"⚠️ 잘못된 JPEG 헤더: {frame_data[:10].hex()}")
             return JSONResponse({"status": "error", "message": "Invalid JPEG header"})
         
         print(f"✅ 유효한 JPEG 프레임: {len(frame_data)} bytes")
         
-        # 🔥 MJPEG 매니저로 브로드캐스트
+        # MJPEG 매니저로 브로드캐스트
         if hasattr(mjpeg_manager, 'broadcast_frame'):
             mjpeg_manager.broadcast_frame(frame_data)
             print(f"📡 프레임 브로드캐스트 완료 (시청자: {mjpeg_manager.stream_stats['viewers']}명)")
@@ -624,25 +644,26 @@ async def receive_mjpeg_stream(request: Request):
             "message": f"Frame processing failed: {str(e)}"
         }, status_code=500)
 
-# 🔥 수정된 /stream 엔드포인트 (올바른 MJPEG 스트림)
+# 🔥 수정된 /stream 엔드포인트
 @app.get("/stream")
 async def mjpeg_stream_viewer():
     """클라이언트용 MJPEG 스트림 (브라우저 호환)"""
     
     def generate_stream():
-        """🔥 올바른 MJPEG 스트림 생성기"""
+        """올바른 MJPEG 스트림 생성기"""
         if not MODULES_AVAILABLE:
             # 더미 응답
-            yield b"--frame\r\nContent-Type: text/plain\r\nContent-Length: 26\r\n\r\nMJPEG service unavailable\r\n"
+            dummy_response = b"--frame\r\nContent-Type: text/plain\r\nContent-Length: 26\r\n\r\nMJPEG service unavailable\r\n"
+            yield dummy_response
             return
             
         frame_queue = mjpeg_manager.add_viewer()
         if frame_queue is None:
-            yield b"--frame\r\nContent-Type: text/plain\r\nContent-Length: 26\r\n\r\nMJPEG service unavailable\r\n"
+            dummy_response = b"--frame\r\nContent-Type: text/plain\r\nContent-Length: 26\r\n\r\nMJPEG service unavailable\r\n"
+            yield dummy_response
             return
         
         try:
-            # 🔥 중요: 초기 boundary는 전송하지 않음 (StreamingResponse가 처리)
             consecutive_timeouts = 0
             max_timeouts = 6  # 30초 후 연결 종료
             
@@ -657,7 +678,7 @@ async def mjpeg_stream_viewer():
                     consecutive_timeouts += 1
                     print(f"⏰ 스트림 타임아웃 {consecutive_timeouts}/{max_timeouts}")
                     
-                    # 🔥 Keep-alive 프레임 전송 (작은 더미 프레임)
+                    # Keep-alive 프레임 전송
                     if mjpeg_manager.latest_frame:
                         # 최신 프레임 재전송
                         keep_alive = mjpeg_manager._create_mjpeg_frame(mjpeg_manager.latest_frame)
@@ -678,7 +699,6 @@ async def mjpeg_stream_viewer():
             mjpeg_manager.remove_viewer(frame_queue)
             print("🔌 스트림 연결 종료")
     
-    # 🔥 올바른 MJPEG 스트림 응답
     return StreamingResponse(
         generate_stream(),
         media_type="multipart/x-mixed-replace; boundary=frame",
@@ -692,9 +712,27 @@ async def mjpeg_stream_viewer():
         }
     )
 
-# 🔥 테스트용 엔드포인트 추가
+# 🔥 스트림 상태 확인
+@app.get("/stream/status")
+def get_stream_status():
+    """MJPEG 스트리밍 상태 조회"""
+    stats = mjpeg_manager.get_stats()
+    
+    return {
+        "status": "active" if stats["viewers"] > 0 or stats.get("esp_eye_connected", False) else "inactive",
+        "viewers": stats["viewers"],
+        "frame_count": stats["frame_count"],
+        "last_frame_time": stats.get("last_frame_time"),
+        "last_frame_age_seconds": stats.get("last_frame_age"),
+        "esp_eye_connected": stats.get("esp_eye_connected", False),
+        "stream_url": "/stream",
+        "has_latest_frame": stats.get("has_latest_frame", False),
+        "timestamp": get_korea_time().isoformat()
+    }
+
+# 🔥 간단한 테스트 페이지
 @app.get("/stream/test")
-def test_stream():
+def test_stream_page():
     """스트림 테스트 페이지"""
     html = """
     <!DOCTYPE html>
@@ -702,29 +740,22 @@ def test_stream():
     <head>
         <title>MJPEG 스트림 테스트</title>
         <style>
-            body { font-family: Arial, sans-serif; margin: 40px; }
-            .stream-container { text-align: center; margin: 20px 0; }
-            img { border: 2px solid #ccc; border-radius: 10px; max-width: 100%; }
-            .info { background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px; }
+            body { font-family: Arial, sans-serif; margin: 40px; text-align: center; }
+            img { border: 2px solid #333; border-radius: 10px; max-width: 90%; }
+            .info { background: #f0f0f0; padding: 15px; margin: 15px 0; border-radius: 5px; }
         </style>
     </head>
     <body>
-        <h1>🎥 MJPEG 스트림 테스트</h1>
+        <h1>🎥 Baby Monitor MJPEG 스트림</h1>
         
         <div class="info">
-            <strong>스트림 URL:</strong> /stream<br>
-            <strong>상태 URL:</strong> /stream/status<br>
-            <strong>테스트 시간:</strong> <span id="time"></span>
+            <div id="status">연결 중...</div>
+            <div>시간: <span id="time"></span></div>
         </div>
         
-        <div class="stream-container">
-            <h3>실시간 MJPEG 스트림:</h3>
-            <img id="mjpegStream" src="/stream" alt="MJPEG Stream" 
-                 onerror="handleError()" onload="handleSuccess()">
-        </div>
-        
-        <div id="status" class="info">
-            연결 중...
+        <div>
+            <img id="stream" src="/stream" alt="MJPEG Stream" 
+                 onerror="showError()" onload="showSuccess()">
         </div>
         
         <script>
@@ -732,27 +763,24 @@ def test_stream():
                 document.getElementById('time').textContent = new Date().toLocaleString();
             }
             
-            function handleError() {
-                document.getElementById('status').innerHTML = 
-                    '<span style="color: red;">❌ 스트림 연결 실패</span>';
+            function showError() {
+                document.getElementById('status').innerHTML = '❌ 스트림 연결 실패';
             }
             
-            function handleSuccess() {
-                document.getElementById('status').innerHTML = 
-                    '<span style="color: green;">✅ 스트림 연결 성공</span>';
+            function showSuccess() {
+                document.getElementById('status').innerHTML = '✅ 스트림 연결 성공';
             }
             
-            // 1초마다 시간 업데이트
             setInterval(updateTime, 1000);
             updateTime();
             
-            // 스트림 상태 주기적 확인
+            // 3초마다 상태 확인
             setInterval(async () => {
                 try {
                     const response = await fetch('/stream/status');
                     const data = await response.json();
                     document.getElementById('status').innerHTML = 
-                        `✅ 시청자: ${data.viewers}명 | 프레임: ${data.frame_count} | ESP Eye: ${data.esp_eye_connected ? '연결됨' : '연결 안됨'}`;
+                        `📺 시청자: ${data.viewers} | 프레임: ${data.frame_count} | ESP Eye: ${data.esp_eye_connected ? '✅' : '❌'}`;
                 } catch (e) {
                     // 오류 무시
                 }
