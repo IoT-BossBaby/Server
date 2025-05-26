@@ -317,6 +317,31 @@ else:
     app_api_handler = None
     print("📱 앱 API 핸들러 비활성화 (모듈 없음)")
 
+@app.get("/images/debug")
+async def debug_image_data():
+    """이미지 데이터 디버깅"""
+    if not MODULES_AVAILABLE:
+        return {"error": "Modules not available"}
+    
+    try:
+        if redis_manager and hasattr(redis_manager, 'get_latest_image'):
+            image_data = redis_manager.get_latest_image()
+            if image_data:
+                image_b64 = image_data.get("image_base64", "")
+                return {
+                    "has_data": True,
+                    "timestamp": image_data.get("timestamp"),
+                    "image_length": len(image_b64),
+                    "image_starts_with": image_b64[:50] if image_b64 else "empty",
+                    "image_ends_with": image_b64[-50:] if len(image_b64) > 50 else image_b64,
+                    "metadata": image_data.get("metadata", {})
+                }
+        
+        return {"has_data": False, "message": "No image data found"}
+        
+    except Exception as e:
+        return {"error": str(e)}
+
 # 🔥 새로 추가: 이미지 관련 API 엔드포인트
 @app.get("/images/latest")
 async def get_latest_image():
@@ -1066,18 +1091,28 @@ def baby_monitor_dashboard():
             async function requestLatestImage() {{
                 try {{
                     console.log('최신 이미지 요청 중...');
-            
+        
                     const response = await fetch('/images/latest');
                     const data = await response.json();
+        
+                    console.log('API 응답:', data);
+        
+                    if (data.status === 'success' && data.has_image && data.image_base64) {{
+                        // Base64 데이터 검증
+                        const base64Data = data.image_base64.trim();
             
-                    if (data.status === 'success' && data.has_image) {{
-                        displayImage(data.image_base64, data.timestamp);
-                        console.log('이미지 로드 성공:', data.size + ' bytes');
+                        if (base64Data.length > 0) {{
+                            displayImage(base64Data, data.timestamp);
+                            console.log('이미지 로드 성공:', data.size + ' bytes');
+                        }} else {{
+                            console.log('빈 이미지 데이터');
+                            showNoImageView();
+                        }}
                     }} else {{
-                        console.log('이미지 없음:', data.message);
+                        console.log('이미지 없음:', data.message || 'Unknown error');
                         showNoImageView();
                     }}
-            
+        
                 }} catch (error) {{
                     console.error('이미지 요청 실패:', error);
                     showNoImageView();
@@ -1089,20 +1124,46 @@ def baby_monitor_dashboard():
                 const noImageView = document.getElementById('noImageView');
                 const latestImage = document.getElementById('latestImage');
                 const timestampElement = document.getElementById('imageTimestamp');
+
+                // 🔥 Base64 데이터 검증 및 설정
+                try {{
+                    // data:image/jpeg;base64, 접두사가 없다면 추가
+                    let imageUrl;
+                    if (base64Data.startsWith('data:')) {{
+                        imageUrl = base64Data;
+                    }} else {{
+                        imageUrl = 'data:image/jpeg;base64,' + base64Data;
+                    }}
         
-                // base64 데이터를 이미지로 설정
-                latestImage.src = 'data:image/jpeg;base64,' + base64Data;
+                    // 이미지 로드 테스트
+                    const testImg = new Image();
+                    testImg.onload = function() {{
+                        console.log('✅ 이미지 로드 성공:', testImg.width + 'x' + testImg.height);
+                        latestImage.src = imageUrl;
+            
+                        // 타임스탬프 설정
+                        if (timestamp) {{
+                            const date = new Date(timestamp);
+                            timestampElement.textContent = date.toLocaleTimeString();
+                            lastImageTimestamp = timestamp;
+                        }}
+            
+                        // 뷰 전환
+                        noImageView.style.display = 'none';
+                        imageView.style.display = 'block';
+                    }};
         
-                // 타임스탬프 설정
-                if (timestamp) {{
-                    const date = new Date(timestamp);
-                    timestampElement.textContent = date.toLocaleTimeString();
-                    lastImageTimestamp = timestamp;
+                    testImg.onerror = function() {{
+                        console.error('❌ 이미지 로드 실패');
+                        showNoImageView();
+                    }};
+        
+                    testImg.src = imageUrl;
+        
+                }} catch (error) {{
+                    console.error('❌ 이미지 표시 오류:', error);
+                    showNoImageView();
                 }}
-        
-                // 뷰 전환
-                noImageView.style.display = 'none';
-                imageView.style.display = 'block';
             }}
     
             function showNoImageView() {{
