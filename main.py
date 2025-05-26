@@ -172,9 +172,28 @@ async def receive_esp32_data(request: Request, data: Dict[str, Any]):
 # 🔥 수정: 개별 엔드포인트들 (호환성 유지)
 @app.post("/esp32/sensor")
 async def receive_esp32_sensor_data(request: Request, data: Dict[str, Any]):
-    """ESP32에서 센서 데이터만 수신 (호환성 유지)"""
-    print(f"📡 센서 전용 엔드포인트 호출 - /esp32/data로 리다이렉트")
-    return await receive_esp32_data(request, data)
+    # print(f"📡 센서 전용 엔드포인트 호출 - /esp32/data로 리다이렉트")
+    # return await receive_esp32_data(request, data)  # ❌ 이 줄 주석 처리
+    
+    # ✅ 올바른 처리
+    if not MODULES_AVAILABLE:
+        return {"error": "Modules not available", "data_received": data}
+    
+    try:
+        client_ip = request.client.host
+        print(f"📡 ESP32 센서 데이터 수신 from {client_ip}: {data}")
+        
+        result = await esp32_handler.handle_esp32_data(data, client_ip)
+        
+        return {
+            **result,
+            "received_from": client_ip,
+            "endpoint": "esp32_sensor"
+        }
+    except Exception as e:
+        print(f"❌ ESP32 센서 데이터 수신 오류: {e}")
+        raise HTTPException(status_code=500, detail=f"ESP32 sensor data processing failed: {str(e)}")
+
 
 @app.post("/esp32/image")
 async def receive_esp_eye_image_data(request: Request, data: Dict[str, Any]):
