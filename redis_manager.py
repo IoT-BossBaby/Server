@@ -64,30 +64,30 @@ class RedisManager:
         return True
     
     def store_image_data(self, image_data: Dict[str, Any]) -> bool:
-    """이미지 데이터 저장"""
-    try:
-        if self.available and self.redis_client:
-            try:
-                # Redis에 저장 (10분 TTL)
-                result = self.redis_client.setex(
-                    "latest_image", 
-                    600,  # 10분 TTL
-                    json.dumps(image_data, ensure_ascii=False)
-                )
-                print(f"📦 Redis 이미지 저장: {result}")
-                return bool(result)
-            except Exception as e:
-                print(f"⚠️ Redis 이미지 저장 실패: {e}")
-                self.available = False
+        """이미지 데이터 저장"""
+        try:
+            if self.available and self.redis_client:
+                try:
+                    # Redis에 저장 (10분 TTL)
+                    result = self.redis_client.setex(
+                        "latest_image", 
+                        600,  # 10분 TTL
+                        json.dumps(image_data, ensure_ascii=False)
+                    )
+                    print(f"📦 Redis 이미지 저장: {result}")
+                    return bool(result)
+                except Exception as e:
+                    print(f"⚠️ Redis 이미지 저장 실패: {e}")
+                    self.available = False
         
-        # 메모리 저장 (fallback)
-        self.in_memory_storage["latest_image"] = image_data
-        print(f"📦 메모리에 이미지 저장: {len(image_data.get('image_base64', ''))} bytes")
-        return True
+            # 메모리 저장 (fallback)
+            self.in_memory_storage["latest_image"] = image_data
+            print(f"📦 메모리에 이미지 저장: {len(image_data.get('image_base64', ''))} bytes")
+            return True
         
-    except Exception as e:
-        print(f"❌ 이미지 저장 총 오류: {e}")
-        return False
+        except Exception as e:
+            print(f"❌ 이미지 저장 총 오류: {e}")
+            return False
 
 def get_latest_image(self) -> Optional[Dict[str, Any]]:
     """최신 이미지 조회"""
