@@ -1,4 +1,4 @@
-# esp32_handler.py (POST 방식으로 수정된 버전)
+# esp32_handler.py 
 import asyncio
 import json
 import aiohttp
@@ -65,7 +65,21 @@ class ESP32Handler:
             # 환경 센서 데이터
             "temperature": float(raw_data.get("temperature", 0.0)),
             "humidity": float(raw_data.get("humidity", 0.0)),
-            "playLullaby": str(raw_data.get("playLullaby", "")).lower() == "true"
+            "playLullaby": str(raw_data.get("playLullaby", "")).lower() == "true",
+            
+            # 움직임 감지
+            "movement_detected": raw_data.get("movement", False),
+            "motion_level": float(raw_data.get("motion_level", 0.0)),
+            
+            # 소음 레벨
+            "sound_level": float(raw_data.get("sound", 0.0)),
+            "noise_detected": raw_data.get("noise_detected", False),
+            
+            # 시스템 상태
+            "battery_level": raw_data.get("battery", None),
+            "wifi_signal": raw_data.get("wifi_signal", None),
+            "memory_free": raw_data.get("memory_free", None),
+            "uptime": raw_data.get("uptime", None),
         }
         
         # 환경 상태 분석
@@ -97,6 +111,32 @@ class ESP32Handler:
                 alert_factors.append(f"부적절한 습도: {processed_data['humidity']}%")
                 alert_score += 1
         
+        # 움직임/소음 감지
+        if processed_data["movement_detected"]:
+            alert_factors.append("움직임 감지됨")
+            alert_score += 1
+        
+        if processed_data["noise_detected"]:
+            alert_factors.append("소음 감지됨")
+            alert_score += 1
+        
+        # 시스템 경고
+        if processed_data.get("battery_level") and processed_data["battery_level"] < 20:
+            alert_factors.append("배터리 부족")
+            alert_score += 1
+        
+        # 알림 레벨 결정
+        if alert_score >= 3:
+            alert_level = "high"
+        elif alert_score >= 1:
+            alert_level = "medium"
+        else:
+            alert_level = "low"
+        
+        processed_data["alert_factors"] = alert_factors
+        processed_data["alert_score"] = alert_score
+        processed_data["alert_level"] = alert_level
+        
         return processed_data
     
     def process_esp_eye_data(self, raw_data: Dict[str, Any], client_ip: str) -> Dict[str, Any]:
@@ -119,7 +159,7 @@ class ESP32Handler:
             "image_size": len(raw_data.get("image", "")),
             
             # 이미지 메타데이터 (기본값 설정)
-            "image_width": raw_data.get("width", 640),  # 기본 해상도
+            "image_width": raw_data.get("width", 640),
             "image_height": raw_data.get("height", 480),
             "image_format": raw_data.get("format", "jpeg"),
             "compression_quality": raw_data.get("quality", 80),
@@ -161,95 +201,148 @@ class ESP32Handler:
         processed_data["alert_level"] = alert_level
         
         return processed_data
-
-async def handle_esp_eye_data(self, raw_data: Dict[str, Any], client_ip: str = "unknown") -> Dict[str, Any]:
-    """ESP Eye 이미지 데이터 처리 파이프라인 (단순화)"""
     
-    try:
-        # 1. 데이터 처리
-        processed_data = self.process_esp_eye_data(raw_data, client_ip)
+    async def handle_esp32_data(self, raw_data: Dict[str, Any], client_ip: str = "unknown") -> Dict[str, Any]:
+        """ESP32 센서 데이터 처리 파이프라인"""
         
-        print(f"👁️ ESP Eye 데이터: 이미지크기={processed_data['image_size']}bytes, "
-              f"상태={processed_data['alert_level']}")
-        
-        # 2. Redis에 이미지 데이터 저장
-        image_stored = False
-        if self.redis_manager and hasattr(self.redis_manager, 'store_image_data'):
-            try:
-                image_data = {
-                    "timestamp": processed_data["timestamp"],
-                    "image_base64": processed_data["image_base64"],
-                    "has_image": processed_data["has_image"],
-                    "alert_level": processed_data["alert_level"],
-                    "metadata": {
-                        "width": processed_data["image_width"],
-                        "height": processed_data["image_height"],
-                        "format": processed_data["image_format"],
-                        "size": processed_data["image_size"]
+        try:
+            # 1. 데이터 처리
+            processed_data = self.process_esp32_sensor_data(raw_data, client_ip)
+            
+            print(f"📡 ESP32 데이터: 온도={processed_data['temperature']}°C, "
+                  f"습도={processed_data['humidity']}%, 알림레벨={processed_data['alert_level']}")
+            
+            # 2. Redis 저장
+            redis_stored = False
+            if self.redis_manager and hasattr(self.redis_manager, 'store_esp32_data'):
+                try:
+                    redis_stored = self.redis_manager.store_esp32_data(processed_data)
+                except Exception as e:
+                    print(f"⚠️ Redis 저장 실패: {e}")
+            
+            # 3. 실시간 앱 전송
+            apps_notified = 0
+            if self.websocket_manager and hasattr(self.websocket_manager, 'broadcast_to_apps'):
+                try:
+                    app_data = {
+                        "type": "esp32_sensor_data",
+                        "source": "esp32",
+                        "data": processed_data,
+                        "korea_time": get_korea_time().strftime("%Y년 %m월 %d일 %H:%M:%S"),
+                        "timestamp": processed_data["timestamp"]
                     }
+                    apps_notified = await self.websocket_manager.broadcast_to_apps(app_data)
+                except Exception as e:
+                    print(f"⚠️ 앱 브로드캐스트 실패: {e}")
+            
+            return {
+                "status": "success",
+                "message": "ESP32 센서 데이터 처리 완료",
+                "device_type": "esp32",
+                "timestamp": processed_data["timestamp"],
+                "korea_time": get_korea_time().strftime("%Y년 %m월 %d일 %H:%M:%S"),
+                "processing_results": {
+                    "redis_stored": redis_stored,
+                    "apps_notified": apps_notified,
+                    "alert_level": processed_data["alert_level"]
                 }
-                image_stored = self.redis_manager.store_image_data(image_data)
-            except Exception as e:
-                print(f"⚠️ 이미지 저장 실패: {e}")
-        
-        # 3. 센서 데이터도 저장 (이미지 정보 포함)
-        redis_stored = False
-        if self.redis_manager and hasattr(self.redis_manager, 'store_esp32_data'):
-            try:
-                # 이미지는 제외하고 메타데이터만 저장
-                sensor_data = processed_data.copy()
-                sensor_data.pop("image_base64", None)  # 용량 절약
-                redis_stored = self.redis_manager.store_esp32_data(sensor_data)
-            except Exception as e:
-                print(f"⚠️ Redis 저장 실패: {e}")
-        
-        # 4. 실시간 앱 전송 (이미지 미포함)
-        apps_notified = 0
-        if self.websocket_manager and hasattr(self.websocket_manager, 'broadcast_to_apps'):
-            try:
-                # 앱용 데이터 (이미지 제외, 메타데이터만)
-                app_data = {
-                    "type": "esp_eye_data",
-                    "source": "esp_eye",
-                    "data": {
-                        "timestamp": processed_data["timestamp"],
-                        "has_new_image": processed_data["has_image"],
-                        "image_size": processed_data["image_size"],
-                        "image_width": processed_data["image_width"],
-                        "image_height": processed_data["image_height"],
-                        "alert_level": processed_data["alert_level"],
-                        "vision_alerts": processed_data["vision_alerts"]
-                    },
-                    "korea_time": get_korea_time().strftime("%Y년 %m월 %d일 %H:%M:%S"),
-                    "timestamp": processed_data["timestamp"]
-                }
-                apps_notified = await self.websocket_manager.broadcast_to_apps(app_data)
-            except Exception as e:
-                print(f"⚠️ 앱 브로드캐스트 실패: {e}")
-        
-        return {
-            "status": "success",
-            "message": "ESP Eye 이미지 처리 완료",
-            "device_type": "esp_eye",
-            "timestamp": processed_data["timestamp"],
-            "korea_time": get_korea_time().strftime("%Y년 %m월 %d일 %H:%M:%S"),
-            "processing_results": {
-                "redis_stored": redis_stored,
-                "image_stored": image_stored,
-                "apps_notified": apps_notified,
-                "alert_level": processed_data["alert_level"],
-                "image_size": processed_data["image_size"]
             }
-        }
+            
+        except Exception as e:
+            print(f"❌ ESP32 데이터 처리 오류: {e}")
+            return {
+                "status": "error",
+                "message": f"ESP32 데이터 처리 실패: {str(e)}",
+                "device_type": "esp32",
+                "timestamp": get_korea_time().isoformat()
+            }
+    
+    async def handle_esp_eye_data(self, raw_data: Dict[str, Any], client_ip: str = "unknown") -> Dict[str, Any]:
+        """ESP Eye 이미지 데이터 처리 파이프라인"""
         
-    except Exception as e:
-        print(f"❌ ESP Eye 데이터 처리 오류: {e}")
-        return {
-            "status": "error",
-            "message": f"ESP Eye 데이터 처리 실패: {str(e)}",
-            "device_type": "esp_eye",
-            "timestamp": get_korea_time().isoformat()
-        }
+        try:
+            # 1. 데이터 처리
+            processed_data = self.process_esp_eye_data(raw_data, client_ip)
+            
+            print(f"👁️ ESP Eye 데이터: 이미지크기={processed_data['image_size']}bytes, "
+                  f"상태={processed_data['alert_level']}")
+            
+            # 2. Redis에 이미지 데이터 저장
+            image_stored = False
+            if self.redis_manager and hasattr(self.redis_manager, 'store_image_data'):
+                try:
+                    image_data = {
+                        "timestamp": processed_data["timestamp"],
+                        "image_base64": processed_data["image_base64"],
+                        "has_image": processed_data["has_image"],
+                        "alert_level": processed_data["alert_level"],
+                        "metadata": {
+                            "width": processed_data["image_width"],
+                            "height": processed_data["image_height"],
+                            "format": processed_data["image_format"],
+                            "size": processed_data["image_size"]
+                        }
+                    }
+                    image_stored = self.redis_manager.store_image_data(image_data)
+                except Exception as e:
+                    print(f"⚠️ 이미지 저장 실패: {e}")
+            
+            # 3. 센서 데이터도 저장 (이미지 정보 포함)
+            redis_stored = False
+            if self.redis_manager and hasattr(self.redis_manager, 'store_esp32_data'):
+                try:
+                    sensor_data = processed_data.copy()
+                    sensor_data.pop("image_base64", None)  # 용량 절약
+                    redis_stored = self.redis_manager.store_esp32_data(sensor_data)
+                except Exception as e:
+                    print(f"⚠️ Redis 저장 실패: {e}")
+            
+            # 4. 실시간 앱 전송 (이미지 미포함)
+            apps_notified = 0
+            if self.websocket_manager and hasattr(self.websocket_manager, 'broadcast_to_apps'):
+                try:
+                    app_data = {
+                        "type": "esp_eye_data",
+                        "source": "esp_eye",
+                        "data": {
+                            "timestamp": processed_data["timestamp"],
+                            "has_new_image": processed_data["has_image"],
+                            "image_size": processed_data["image_size"],
+                            "image_width": processed_data["image_width"],
+                            "image_height": processed_data["image_height"],
+                            "alert_level": processed_data["alert_level"],
+                            "vision_alerts": processed_data["vision_alerts"]
+                        },
+                        "korea_time": get_korea_time().strftime("%Y년 %m월 %d일 %H:%M:%S"),
+                        "timestamp": processed_data["timestamp"]
+                    }
+                    apps_notified = await self.websocket_manager.broadcast_to_apps(app_data)
+                except Exception as e:
+                    print(f"⚠️ 앱 브로드캐스트 실패: {e}")
+            
+            return {
+                "status": "success",
+                "message": "ESP Eye 이미지 처리 완료",
+                "device_type": "esp_eye",
+                "timestamp": processed_data["timestamp"],
+                "korea_time": get_korea_time().strftime("%Y년 %m월 %d일 %H:%M:%S"),
+                "processing_results": {
+                    "redis_stored": redis_stored,
+                    "image_stored": image_stored,
+                    "apps_notified": apps_notified,
+                    "alert_level": processed_data["alert_level"],
+                    "image_size": processed_data["image_size"]
+                }
+            }
+            
+        except Exception as e:
+            print(f"❌ ESP Eye 데이터 처리 오류: {e}")
+            return {
+                "status": "error",
+                "message": f"ESP Eye 데이터 처리 실패: {str(e)}",
+                "device_type": "esp_eye",
+                "timestamp": get_korea_time().isoformat()
+            }
     
     async def send_command_to_esp32(self, command: Dict[str, Any]) -> bool:
         """ESP32에 명령 전송 (IP가 있는 경우에만)"""
@@ -265,13 +358,6 @@ async def handle_esp_eye_data(self, raw_data: Dict[str, Any], client_ip: str = "
                 "timestamp": get_korea_time().isoformat(),
                 "source": "server"
             }
-            
-            # Redis에 명령 기록
-            if self.redis_manager and hasattr(self.redis_manager, 'store_command'):
-                try:
-                    self.redis_manager.store_command(command_data)
-                except Exception as e:
-                    print(f"⚠️ 명령 기록 저장 실패: {e}")
             
             # ESP32에 HTTP POST 전송
             url = f"http://{self.esp32_ip}/command"
