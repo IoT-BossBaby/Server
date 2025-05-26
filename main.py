@@ -1179,7 +1179,7 @@ def baby_monitor_dashboard():
                 // 5초마다 새 이미지 확인
                 imageRefreshInterval = setInterval(async () => {{
                     await requestLatestImage();
-                }}, 5000);
+                }}, 1000);
             }}
     
             function playLullaby() {{
@@ -1208,7 +1208,7 @@ def baby_monitor_dashboard():
                 if (checkbox.checked) {{
                     autoRefreshInterval = setInterval(() => {{
                         refreshData();
-                    }}, 10000); // 10초마다 새로고침
+                    }}, 30000); // 30초마다 새로고침
             
                     // 이미지 자동 새로고침도 시작
                     setupImageAutoRefresh();
