@@ -115,6 +115,57 @@ class RedisManager:
         except Exception as e:
             print(f"❌ 이미지 조회 총 오류: {e}")
             return None
+
+    def get_latest_image_binary(self):
+        try:
+            if not self.available:
+                return None, None
+        
+            # 바이너리 데이터 조회
+            jpg_binary = self.redis.get("image:latest_binary")
+        
+            # 메타데이터 조회
+            metadata = self.redis.hgetall("image:latest_meta")
+        
+            if jpg_binary and metadata:
+                # bytes 타입 확인
+                if isinstance(jpg_binary, str):
+                    jpg_binary = jpg_binary.encode('latin-1')
+            
+                # 메타데이터 타입 변환
+                meta_dict = {}
+                for key, value in metadata.items():
+                    if isinstance(key, bytes):
+                        key = key.decode('utf-8')
+                    if isinstance(value, bytes):
+                        value = value.decode('utf-8')
+                    meta_dict[key] = value
+            
+                return jpg_binary, meta_dict
+        
+            return None, None
+        
+        except Exception as e:
+            print(f"❌ Redis 바이너리 이미지 조회 실패: {e}")
+            return None, None
+
+    def get_image_by_id(self, image_id):
+        try:
+            if not self.available:
+                return None
+        
+            # ID로 이미지 조회 (간단한 구현)
+            image_key = f"image:{image_id}"
+            image_data = self.redis.get(image_key)
+        
+            if image_data:
+                return json.loads(image_data)
+        
+            return None
+        
+        except Exception as e:
+            print(f"❌ Redis 이미지 ID 조회 실패: {e}")
+            return None
     
     def get_current_status(self) -> Optional[Dict[str, Any]]:
         """현재 상태 조회"""

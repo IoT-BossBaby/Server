@@ -9,6 +9,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
 import asyncio
 import json
+import base64 
 
 # 시간대 설정 (Railway 안전 버전)
 try:
@@ -37,6 +38,11 @@ class AppApiHandler:
         self.router.add_api_route("/data/history", self.get_data_history, methods=["GET"])
         self.router.add_api_route("/images/latest", self.get_latest_image, methods=["GET"])
         self.router.add_api_route("/stats/daily", self.get_daily_stats, methods=["GET"])
+
+        # 🔥 새로운 JPG 직접 전송 라우트들
+        self.router.add_api_route("/images/latest.jpg", self.get_latest_image_jpg, methods=["GET"])
+        self.router.add_api_route("/images/{image_id}.jpg", self.get_image_by_id_jpg, methods=["GET"])
+        self.router.add_api_route("/images/info", self.get_latest_image_info, methods=["GET"])
         
         # ESP32 제어 API
         self.router.add_api_route("/command", self.send_command_to_esp32, methods=["POST"])
@@ -240,8 +246,178 @@ class AppApiHandler:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"히스토리 조회 실패: {str(e)}")
 
+    def get_latest_image_jpg(self):
+        """최신 이미지를 JPG 파일로 직접 반환"""
+        try:
+            # Redis에서 최신 이미지 조회
+            recent_images = []
+            if self.redis_manager and hasattr(self.redis_manager, 'get_recent_images'):
+                try:
+                    recent_images = self.redis_manager.get_recent_images(1) or []
+                except:
+                    recent_images = []
+            
+            # Redis에 바이너리 저장 메서드가 있다면 그것 사용
+            if self.redis_manager and hasattr(self.redis_manager, 'get_latest_image_binary'):
+                try:
+                    jpg_binary, metadata = self.redis_manager.get_latest_image_binary()
+                    if jpg_binary:
+                        timestamp = metadata.get("timestamp", "latest") if metadata else "latest"
+                        return Response(
+                            content=jpg_binary,
+                            media_type="image/jpeg",
+                            headers={
+                                "Content-Disposition": f"inline; filename=baby_monitor_{timestamp}.jpg",
+                                "Content-Length": str(len(jpg_binary)),
+                                "Cache-Control": "no-cache, no-store, must-revalidate",
+                                "Pragma": "no-cache",
+                                "Expires": "0",
+                                "X-Image-Size": str(len(jpg_binary)),
+                                "X-Timestamp": timestamp
+                            }
+                        )
+                except Exception as e:
+                    print(f"⚠️ 바이너리 이미지 조회 실패: {e}")
+            
+            # 폴백: 기존 Base64 방식 사용
+            if not recent_images:
+                raise HTTPException(status_code=404, detail="이미지가 없습니다")
+            
+            image_data = recent_images[0]
+            base64_image = image_data.get("image_base64", "")
+            
+            if not base64_image:
+                raise HTTPException(status_code=404, detail="이미지 데이터가 없습니다")
+            
+            # Base64 → 바이너리 디코딩
+            try:
+                # data:image/jpeg;base64, 접두사 제거 (있다면)
+                if base64_image.startswith("data:"):
+                    base64_image = base64_image.split(",", 1)[-1]
+                
+                # Base64 디코딩
+                jpg_bytes = base64.b64decode(base64_image)
+                
+                # JPG 파일로 직접 응답
+                return Response(
+                    content=jpg_bytes,
+                    media_type="image/jpeg",
+                    headers={
+                        "Content-Disposition": f"inline; filename=baby_monitor_{image_data.get('timestamp', 'latest')}.jpg",
+                        "Cache-Control": "no-cache, no-store, must-revalidate",
+                        "Pragma": "no-cache",
+                        "Expires": "0"
+                    }
+                )
+                
+            except Exception as decode_error:
+                raise HTTPException(status_code=500, detail=f"이미지 디코딩 실패: {str(decode_error)}")
+                
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"이미지 조회 실패: {str(e)}")
+
+    def get_image_by_id_jpg(self, image_id: str):
+        """특정 ID의 이미지를 JPG 파일로 반환"""
+        try:
+            # Redis에서 특정 이미지 조회
+            image_data = None
+            if self.redis_manager and hasattr(self.redis_manager, 'get_image_by_id'):
+                try:
+                    image_data = self.redis_manager.get_image_by_id(image_id)
+                except:
+                    image_data = None
+            
+            if not image_data:
+                raise HTTPException(status_code=404, detail="이미지를 찾을 수 없습니다")
+            
+            base64_image = image_data.get("image_base64", "")
+            if not base64_image:
+                raise HTTPException(status_code=404, detail="이미지 데이터가 없습니다")
+            
+            # Base64 → 바이너리 디코딩
+            try:
+                if base64_image.startswith("data:"):
+                    base64_image = base64_image.split(",", 1)[-1]
+                
+                jpg_bytes = base64.b64decode(base64_image)
+                
+                return Response(
+                    content=jpg_bytes,
+                    media_type="image/jpeg",
+                    headers={
+                        "Content-Disposition": f"inline; filename=baby_monitor_{image_id}.jpg",
+                        "Cache-Control": "max-age=3600",  # 1시간 캐시 (과거 이미지는 캐시 가능)
+                    }
+                )
+                
+            except Exception as decode_error:
+                raise HTTPException(status_code=500, detail=f"이미지 디코딩 실패: {str(decode_error)}")
+                
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"이미지 조회 실패: {str(e)}")
+
+    def get_latest_image_info(self):
+        """이미지 메타데이터만 조회 (바이너리 제외)"""
+        try:
+            # Redis에서 최신 이미지 메타데이터 조회
+            if self.redis_manager and hasattr(self.redis_manager, 'get_latest_image_binary'):
+                try:
+                    jpg_binary, metadata = self.redis_manager.get_latest_image_binary()
+                    if metadata:
+                        return {
+                            "status": "success",
+                            "timestamp": datetime.now(KST).isoformat(),
+                            "image": {
+                                "timestamp": metadata.get("timestamp"),
+                                "size": metadata.get("binary_size"),
+                                "format": "jpeg",
+                                "width": metadata.get("width"),
+                                "height": metadata.get("height"),
+                                "jpg_url": "/app/images/latest.jpg",
+                                "has_binary": jpg_binary is not None
+                            }
+                        }
+                except Exception as e:
+                    print(f"⚠️ 바이너리 메타데이터 조회 실패: {e}")
+            
+            # 폴백: 기존 방식
+            recent_images = []
+            if self.redis_manager and hasattr(self.redis_manager, 'get_recent_images'):
+                try:
+                    recent_images = self.redis_manager.get_recent_images(1) or []
+                except:
+                    recent_images = []
+            
+            if recent_images:
+                image_data = recent_images[0]
+                return {
+                    "status": "success",
+                    "timestamp": datetime.now(KST).isoformat(),
+                    "image": {
+                        "timestamp": image_data.get("timestamp"),
+                        "size": len(image_data.get("image_base64", "")),
+                        "format": "jpeg",
+                        "metadata": image_data.get("metadata", {}),
+                        "jpg_url": "/app/images/latest.jpg",
+                        "has_binary": bool(image_data.get("image_base64"))
+                    }
+                }
+            
+            return {
+                "status": "no_image",
+                "message": "이미지가 없습니다",
+                "timestamp": datetime.now(KST).isoformat()
+            }
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"이미지 정보 조회 실패: {str(e)}")
+
     def get_latest_image(self, include_data: bool = False):
-        """앱에서 최신 이미지 조회"""
+        """앱에서 최신 이미지 조회 (Base64 방식 - 하위 호환성)"""
         try:
             recent_images = []
             if self.redis_manager and hasattr(self.redis_manager, 'get_recent_images'):
@@ -259,15 +435,16 @@ class AppApiHandler:
                         "timestamp": image_data.get("timestamp"),
                         "metadata": image_data.get("metadata", {}),
                         "size": image_data.get("size"),
-                        "format": image_data.get("format", "jpeg")
+                        "format": image_data.get("format", "jpeg"),
+                        # 🔥 새로운 직접 다운로드 URL 추가
+                        "jpg_url": "/app/images/latest.jpg",
+                        "direct_download": "/app/images/latest.jpg"
                     }
                 }
                 
-                # 이미지 데이터 포함 여부
+                # 레거시 지원: Base64 데이터도 요청시 포함
                 if include_data:
                     response["image"]["data"] = image_data.get("image_base64")
-                else:
-                    response["image"]["download_url"] = f"/app/images/download/{image_data.get('id', 'latest')}"
                 
                 return response
             else:
