@@ -94,6 +94,7 @@ if not MODULES_AVAILABLE:
 class MJPEGStreamManager:
     def __init__(self):
         self.active_streams: List[queue.Queue] = []
+        self.latest_frame: bytes = None  # 🔥 최신 프레임 저장
         self.stream_stats = {
             "viewers": 0,
             "frame_count": 0,
@@ -106,10 +107,19 @@ class MJPEGStreamManager:
     def add_viewer(self) -> queue.Queue:
         """새로운 시청자 추가"""
         with self.lock:
-            frame_queue = queue.Queue(maxsize=5)  # 최대 5프레임 버퍼
+            frame_queue = queue.Queue(maxsize=10)  # 🔥 버퍼 크기 증가
             self.active_streams.append(frame_queue)
             self.stream_stats["viewers"] = len(self.active_streams)
             print(f"🔗 새 시청자 연결됨 (총 {self.stream_stats['viewers']}명)")
+            
+            # 🔥 최신 프레임이 있으면 즉시 전송
+            if self.latest_frame:
+                try:
+                    mjpeg_frame = self._create_mjpeg_frame(self.latest_frame)
+                    frame_queue.put_nowait(mjpeg_frame)
+                except queue.Full:
+                    pass
+                    
             return frame_queue
     
     def remove_viewer(self, frame_queue: queue.Queue):
@@ -120,51 +130,65 @@ class MJPEGStreamManager:
                 self.stream_stats["viewers"] = len(self.active_streams)
                 print(f"❌ 시청자 연결 해제됨 (총 {self.stream_stats['viewers']}명)")
     
+    def _create_mjpeg_frame(self, frame_data: bytes) -> bytes:
+        """🔥 올바른 MJPEG 프레임 형식 생성"""
+        # MJPEG 표준 형식에 맞춰 프레임 구성
+        mjpeg_frame = (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n"
+            f"Content-Length: {len(frame_data)}\r\n\r\n".encode() +
+            frame_data +
+            b"\r\n"
+        )
+        return mjpeg_frame
+    
     def broadcast_frame(self, frame_data: bytes):
         """모든 시청자에게 프레임 브로드캐스트"""
-        if not self.active_streams:
+        if not frame_data or len(frame_data) < 100:
             return
-        
+            
         with self.lock:
+            # 🔥 최신 프레임 저장
+            self.latest_frame = frame_data
             self.stream_stats["frame_count"] += 1
             self.stream_stats["last_frame_time"] = time.time()
             self.stream_stats["esp_eye_connected"] = True
             
-            # 🔥 수정: MJPEG 프레임 형식으로 구성 (bytes만 사용)
-            boundary = b"--frame\r\n"
-            content_type = b"Content-Type: image/jpeg\r\n"
-            content_length = f"Content-Length: {len(frame_data)}\r\n\r\n".encode('utf-8')
-            frame_end = b"\r\n"
-            
-            mjpeg_frame = boundary + content_type + content_length + frame_data + frame_end
+            # MJPEG 프레임 생성
+            mjpeg_frame = self._create_mjpeg_frame(frame_data)
             
             # 모든 활성 스트림에 전송
             dead_queues = []
-            for frame_queue in self.active_streams[:]:  # 복사본으로 순회
+            for frame_queue in self.active_streams[:]:
                 try:
                     # 큐가 가득 찬 경우 오래된 프레임 제거
-                    while frame_queue.qsize() >= frame_queue.maxsize:
+                    while frame_queue.qsize() >= frame_queue.maxsize - 1:
                         try:
                             frame_queue.get_nowait()
                         except queue.Empty:
                             break
                     
                     frame_queue.put_nowait(mjpeg_frame)
-                except:
+                except Exception as e:
+                    print(f"⚠️ 큐 오류: {e}")
                     dead_queues.append(frame_queue)
             
             # 죽은 큐 정리
             for dead_queue in dead_queues:
                 self.remove_viewer(dead_queue)
             
-            if self.stream_stats["frame_count"] % 30 == 0:  # 30프레임마다 로그
-                print(f"📺 프레임 {self.stream_stats['frame_count']} 브로드캐스트 (시청자: {len(self.active_streams)})")
+            # 로깅 (30프레임마다)
+            if self.stream_stats["frame_count"] % 30 == 0:
+                print(f"📺 프레임 {self.stream_stats['frame_count']} 브로드캐스트 "
+                      f"(시청자: {len(self.active_streams)}, 크기: {len(frame_data)} bytes)")
     
     def get_stats(self) -> Dict[str, Any]:
         """스트리밍 통계 반환"""
+        current_time = time.time()
         return {
             **self.stream_stats,
-            "last_frame_age": time.time() - self.stream_stats["last_frame_time"] if self.stream_stats["last_frame_time"] else None
+            "last_frame_age": current_time - self.stream_stats["last_frame_time"] if self.stream_stats["last_frame_time"] else None,
+            "has_latest_frame": self.latest_frame is not None
         }
 
 # 🔥 전역 MJPEG 매니저 인스턴스
@@ -538,79 +562,111 @@ def reconnect_redis():
 
 @app.post("/video")
 async def receive_mjpeg_stream(request: Request):
-    """ESP Eye에서 MJPEG 스트림 수신 (수정된 버전)"""
+    """🎥 ESP Eye에서 개별 JPEG 프레임 수신"""
     client_ip = request.client.host
-    print(f"🚀 ESP Eye MJPEG 연결: {client_ip}")
+    content_length = request.headers.get("content-length", "0")
+    content_type = request.headers.get("content-type", "unknown")
+    
+    print(f"🚀 ESP Eye POST: {client_ip} ({content_length} bytes, {content_type})")
     
     try:
         # ESP32 핸들러에 상태 업데이트
         if MODULES_AVAILABLE and hasattr(esp32_handler, 'update_device_status'):
             esp32_handler.update_device_status("esp_eye", client_ip)
         
-        # 스트림 데이터 처리
-        frame_count = 0
-        async for chunk in request.stream():
-            if chunk and len(chunk) > 0:
-                frame_count += 1
+        # 🔥 요청 본문 읽기
+        frame_data = await request.body()
+        
+        if not frame_data:
+            print("⚠️ 빈 프레임 데이터")
+            return JSONResponse({"status": "error", "message": "Empty frame data"})
+        
+        # 🔥 JPEG 헤더 확인
+        if len(frame_data) < 2 or frame_data[0] != 0xFF or frame_data[1] != 0xD8:
+            print(f"⚠️ 잘못된 JPEG 헤더: {frame_data[:10].hex()}")
+            return JSONResponse({"status": "error", "message": "Invalid JPEG header"})
+        
+        print(f"✅ 유효한 JPEG 프레임: {len(frame_data)} bytes")
+        
+        # 🔥 MJPEG 매니저로 브로드캐스트
+        if hasattr(mjpeg_manager, 'broadcast_frame'):
+            mjpeg_manager.broadcast_frame(frame_data)
+            print(f"📡 프레임 브로드캐스트 완료 (시청자: {mjpeg_manager.stream_stats['viewers']}명)")
+        
+        # Redis 저장 (기존 시스템과 연동)
+        if MODULES_AVAILABLE and len(frame_data) > 1000:
+            try:
+                import base64
+                base64_data = base64.b64encode(frame_data).decode('utf-8')
                 
-                # 🔥 모든 시청자에게 브로드캐스트
-                mjpeg_manager.broadcast_frame(chunk)
-                
-                # 🔥 선택사항: 주기적으로 개별 프레임 저장 (Redis)
-                if MODULES_AVAILABLE and len(chunk) > 1000 and frame_count % 30 == 0:  # 30프레임마다 한 번만
-                    try:
-                        # JPEG 헤더 확인
-                        if chunk.startswith(b'\xff\xd8\xff'):
-                            # Base64로 인코딩해서 기존 시스템에 저장
-                            import base64
-                            base64_data = base64.b64encode(chunk).decode('utf-8')
-                            
-                            # 기존 이미지 처리 시스템 활용
-                            image_data = {
-                                "image": base64_data,
-                                "source": "mjpeg_stream",
-                                "timestamp": get_korea_time().isoformat(),
-                                "frame_number": frame_count
-                            }
-                            await esp32_handler.handle_esp_eye_data(image_data, client_ip)
-                    except Exception as e:
-                        print(f"⚠️ 프레임 저장 오류: {e}")
+                image_data = {
+                    "image": base64_data,
+                    "source": "mjpeg_single_post",
+                    "timestamp": get_korea_time().isoformat(),
+                }
+                await esp32_handler.handle_esp_eye_data(image_data, client_ip)
+                print("💾 Redis 저장 완료")
+            except Exception as e:
+                print(f"⚠️ Redis 저장 실패: {e}")
         
-        print(f"📴 ESP Eye MJPEG 연결 해제: {client_ip} (총 {frame_count}프레임 수신)")
-        
-        # 연결 해제 시 상태 업데이트
-        mjpeg_manager.stream_stats["esp_eye_connected"] = False
-        
-        return JSONResponse({"status": "ok", "frames_received": frame_count})
+        return JSONResponse({
+            "status": "success", 
+            "message": "Frame received successfully",
+            "frame_size": len(frame_data),
+            "viewers": mjpeg_manager.stream_stats.get("viewers", 0),
+            "frame_count": mjpeg_manager.stream_stats.get("frame_count", 0)
+        })
         
     except Exception as e:
-        print(f"❌ MJPEG 스트림 처리 오류: {e}")
-        mjpeg_manager.stream_stats["esp_eye_connected"] = False
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+        print(f"❌ 프레임 처리 오류: {e}")
+        return JSONResponse({
+            "status": "error", 
+            "message": f"Frame processing failed: {str(e)}"
+        }, status_code=500)
 
+# 🔥 수정된 /stream 엔드포인트 (올바른 MJPEG 스트림)
 @app.get("/stream")
 async def mjpeg_stream_viewer():
-    """클라이언트용 MJPEG 스트림 (수정된 버전)"""
+    """클라이언트용 MJPEG 스트림 (브라우저 호환)"""
     
     def generate_stream():
-        """MJPEG 스트림 생성기"""
+        """🔥 올바른 MJPEG 스트림 생성기"""
+        if not MODULES_AVAILABLE:
+            # 더미 응답
+            yield b"--frame\r\nContent-Type: text/plain\r\nContent-Length: 26\r\n\r\nMJPEG service unavailable\r\n"
+            return
+            
         frame_queue = mjpeg_manager.add_viewer()
+        if frame_queue is None:
+            yield b"--frame\r\nContent-Type: text/plain\r\nContent-Length: 26\r\n\r\nMJPEG service unavailable\r\n"
+            return
         
         try:
-            # 🔥 수정: 초기 MJPEG 헤더 (bytes로 통일)
-            yield b"--frame\r\n"
+            # 🔥 중요: 초기 boundary는 전송하지 않음 (StreamingResponse가 처리)
+            consecutive_timeouts = 0
+            max_timeouts = 6  # 30초 후 연결 종료
             
-            while True:
+            while consecutive_timeouts < max_timeouts:
                 try:
                     # 큐에서 프레임 대기 (5초 타임아웃)
                     frame_data = frame_queue.get(timeout=5.0)
                     yield frame_data
+                    consecutive_timeouts = 0  # 성공시 카운터 리셋
                     
                 except queue.Empty:
-                    # 타임아웃 시 keep-alive 프레임
-                    print("⏰ 스트림 타임아웃 - 연결 유지")
-                    keep_alive = b"--frame\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n\r\n"
-                    yield keep_alive
+                    consecutive_timeouts += 1
+                    print(f"⏰ 스트림 타임아웃 {consecutive_timeouts}/{max_timeouts}")
+                    
+                    # 🔥 Keep-alive 프레임 전송 (작은 더미 프레임)
+                    if mjpeg_manager.latest_frame:
+                        # 최신 프레임 재전송
+                        keep_alive = mjpeg_manager._create_mjpeg_frame(mjpeg_manager.latest_frame)
+                        yield keep_alive
+                        consecutive_timeouts = 0
+                    else:
+                        # 더미 keep-alive
+                        keep_alive = b"--frame\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nkeepalive\r\n"
+                        yield keep_alive
                     continue
                     
                 except Exception as e:
@@ -620,18 +676,92 @@ async def mjpeg_stream_viewer():
         finally:
             # 시청자 정리
             mjpeg_manager.remove_viewer(frame_queue)
+            print("🔌 스트림 연결 종료")
     
+    # 🔥 올바른 MJPEG 스트림 응답
     return StreamingResponse(
         generate_stream(),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
+            "Pragma": "no-cache", 
             "Expires": "0",
             "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*"
+            "Access-Control-Allow-Origin": "*",
+            "X-Accel-Buffering": "no",  # Nginx 버퍼링 비활성화
         }
     )
+
+# 🔥 테스트용 엔드포인트 추가
+@app.get("/stream/test")
+def test_stream():
+    """스트림 테스트 페이지"""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>MJPEG 스트림 테스트</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            .stream-container { text-align: center; margin: 20px 0; }
+            img { border: 2px solid #ccc; border-radius: 10px; max-width: 100%; }
+            .info { background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        </style>
+    </head>
+    <body>
+        <h1>🎥 MJPEG 스트림 테스트</h1>
+        
+        <div class="info">
+            <strong>스트림 URL:</strong> /stream<br>
+            <strong>상태 URL:</strong> /stream/status<br>
+            <strong>테스트 시간:</strong> <span id="time"></span>
+        </div>
+        
+        <div class="stream-container">
+            <h3>실시간 MJPEG 스트림:</h3>
+            <img id="mjpegStream" src="/stream" alt="MJPEG Stream" 
+                 onerror="handleError()" onload="handleSuccess()">
+        </div>
+        
+        <div id="status" class="info">
+            연결 중...
+        </div>
+        
+        <script>
+            function updateTime() {
+                document.getElementById('time').textContent = new Date().toLocaleString();
+            }
+            
+            function handleError() {
+                document.getElementById('status').innerHTML = 
+                    '<span style="color: red;">❌ 스트림 연결 실패</span>';
+            }
+            
+            function handleSuccess() {
+                document.getElementById('status').innerHTML = 
+                    '<span style="color: green;">✅ 스트림 연결 성공</span>';
+            }
+            
+            // 1초마다 시간 업데이트
+            setInterval(updateTime, 1000);
+            updateTime();
+            
+            // 스트림 상태 주기적 확인
+            setInterval(async () => {
+                try {
+                    const response = await fetch('/stream/status');
+                    const data = await response.json();
+                    document.getElementById('status').innerHTML = 
+                        `✅ 시청자: ${data.viewers}명 | 프레임: ${data.frame_count} | ESP Eye: ${data.esp_eye_connected ? '연결됨' : '연결 안됨'}`;
+                } catch (e) {
+                    // 오류 무시
+                }
+            }, 3000);
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
 
 @app.get("/stream/status")
 def get_stream_status():
