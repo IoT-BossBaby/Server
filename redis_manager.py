@@ -89,47 +89,52 @@ class RedisManager:
             print(f"❌ 이미지 저장 총 오류: {e}")
             return False
 
-def get_latest_image(self) -> Optional[Dict[str, Any]]:
-    """최신 이미지 조회"""
-    try:
-        # Redis 시도
-        if self.available and self.redis_client:
-            try:
-                data = self.redis_client.get("latest_image")
-                if data:
-                    result = json.loads(data)
-                    print(f"📦 Redis에서 이미지 조회: {len(result.get('image_base64', ''))} bytes")
-                    return result
-            except Exception as e:
-                print(f"⚠️ Redis 이미지 조회 실패: {e}")
-                self.available = False
+    def get_latest_image(self) -> Optional[Dict[str, Any]]:
+        """최신 이미지 조회"""
+        try:
+            # Redis 시도
+            if self.available and self.redis_client:
+                try:
+                    data = self.redis_client.get("latest_image")
+                    if data:
+                        result = json.loads(data)
+                        print(f"📦 Redis에서 이미지 조회: {len(result.get('image_base64', ''))} bytes")
+                        return result
+                except Exception as e:
+                    print(f"⚠️ Redis 이미지 조회 실패: {e}")
+                    self.available = False
         
-        # 메모리 조회 (fallback)
-        result = self.in_memory_storage.get("latest_image")
-        if result:
-            print(f"📦 메모리에서 이미지 조회: {len(result.get('image_base64', ''))} bytes")
-        else:
-            print("📦 저장된 이미지 없음")
-        return result
+            # 메모리 조회 (fallback)
+            result = self.in_memory_storage.get("latest_image")
+            if result:
+                print(f"📦 메모리에서 이미지 조회: {len(result.get('image_base64', ''))} bytes")
+            else:
+                print("📦 저장된 이미지 없음")
+            return result
         
-    except Exception as e:
-        print(f"❌ 이미지 조회 총 오류: {e}")
-        return None
+        except Exception as e:
+            print(f"❌ 이미지 조회 총 오류: {e}")
+            return None
     
     def get_current_status(self) -> Optional[Dict[str, Any]]:
         """현재 상태 조회"""
-        # Redis 시도
-        if self.available and self.redis_client:
-            try:
-                data = self.redis_client.get("current_esp32_data")
-                if data:
-                    return json.loads(data)
-            except Exception as e:
-                print(f"⚠️ Redis 조회 실패: {e}")
-                self.available = False
+        try:
+            # Redis 시도
+            if self.available and self.redis_client:
+                try:
+                    data = self.redis_client.get("current_esp32_data")
+                    if data:
+                        return json.loads(data)
+                except Exception as e:
+                    print(f"⚠️ Redis 조회 실패: {e}")
+                    self.available = False
         
-        # 메모리 조회
-        return self.in_memory_storage.get("current_esp32_data")
+            # 메모리 조회
+            return self.in_memory_storage.get("current_esp32_data")
+        
+        except Exception as e:
+            print(f"❌ 상태 조회 총 오류: {e}")
+            return None
     
     def reconnect(self):
         """재연결 시도"""
