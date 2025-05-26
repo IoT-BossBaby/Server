@@ -1,9 +1,10 @@
 from fastapi import FastAPI, WebSocket, HTTPException, BackgroundTasks, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse 
+from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import json
 import os
-from typing import Dict, Any
+from typing import Dict, Any, List
 from app_api_handler import AppApiHandler
 from realtime_handler import RealTimeHandler
 from datetime import datetime, timezone, timedelta
@@ -11,6 +12,7 @@ import pytz
 import queue  
 import threading  
 import time 
+import base64
 
 KST = pytz.timezone('Asia/Seoul')
 
