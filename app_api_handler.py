@@ -53,6 +53,13 @@ class AppApiHandler:
         self.router.add_api_route("/ping", self.app_ping, methods=["GET"])
         self.router.add_api_route("/status", self.get_app_status, methods=["GET"])
 
+        # 🔥 새로운 JPG 직접 전송 라우트 추가
+        self.router.add_api_route("/images/latest.jpg", self.get_latest_image_jpg, methods=["GET"])
+        self.router.add_api_route("/images/{image_id}.jpg", self.get_image_by_id_jpg, methods=["GET"])
+        
+        # 기존 Base64 방식도 유지 (하위 호환성)
+        self.router.add_api_route("/images/latest", self.get_latest_image, methods=["GET"])
+
     async def websocket_stream(self, websocket: WebSocket):
         """앱에서 실시간 데이터를 받기 위한 WebSocket 연결"""
         client_id = None

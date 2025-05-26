@@ -85,86 +85,6 @@ if not MODULES_AVAILABLE:
     
     print("🍼 Baby Monitor Server 시작 (기본 모드)")
 
-# 🔥 MJPEG 스트리밍 매니저 클래스 추가
-class MJPEGStreamManager:
-    def __init__(self):
-        self.active_streams: List[queue.Queue] = []
-        self.stream_stats = {
-            "viewers": 0,
-            "frame_count": 0,
-            "last_frame_time": None,
-            "esp_eye_connected": False
-        }
-        self.lock = threading.Lock()
-        print("🎥 MJPEG 스트리밍 매니저 초기화")
-    
-    def add_viewer(self) -> queue.Queue:
-        """새로운 시청자 추가"""
-        with self.lock:
-            frame_queue = queue.Queue(maxsize=5)  # 최대 5프레임 버퍼
-            self.active_streams.append(frame_queue)
-            self.stream_stats["viewers"] = len(self.active_streams)
-            print(f"🔗 새 시청자 연결됨 (총 {self.stream_stats['viewers']}명)")
-            return frame_queue
-    
-    def remove_viewer(self, frame_queue: queue.Queue):
-        """시청자 제거"""
-        with self.lock:
-            if frame_queue in self.active_streams:
-                self.active_streams.remove(frame_queue)
-                self.stream_stats["viewers"] = len(self.active_streams)
-                print(f"❌ 시청자 연결 해제됨 (총 {self.stream_stats['viewers']}명)")
-    
-    def broadcast_frame(self, frame_data: bytes):
-        """모든 시청자에게 프레임 브로드캐스트"""
-        if not self.active_streams:
-            return
-        
-        with self.lock:
-            self.stream_stats["frame_count"] += 1
-            self.stream_stats["last_frame_time"] = time.time()
-            self.stream_stats["esp_eye_connected"] = True
-            
-            # MJPEG 프레임 형식으로 구성
-            mjpeg_frame = (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n"
-                f"Content-Length: {len(frame_data)}\r\n\r\n".encode() +
-                frame_data + b"\r\n"
-            )
-            
-            # 모든 활성 스트림에 전송
-            dead_queues = []
-            for frame_queue in self.active_streams[:]:  # 복사본으로 순회
-                try:
-                    # 큐가 가득 찬 경우 오래된 프레임 제거
-                    while frame_queue.qsize() >= frame_queue.maxsize:
-                        try:
-                            frame_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                    
-                    frame_queue.put_nowait(mjpeg_frame)
-                except:
-                    dead_queues.append(frame_queue)
-            
-            # 죽은 큐 정리
-            for dead_queue in dead_queues:
-                self.remove_viewer(dead_queue)
-            
-            if self.stream_stats["frame_count"] % 30 == 0:  # 30프레임마다 로그
-                print(f"📺 프레임 {self.stream_stats['frame_count']} 브로드캐스트 (시청자: {len(self.active_streams)})")
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """스트리밍 통계 반환"""
-        return {
-            **self.stream_stats,
-            "last_frame_age": time.time() - self.stream_stats["last_frame_time"] if self.stream_stats["last_frame_time"] else None
-        }
-
-# 🔥 전역 MJPEG 매니저 인스턴스
-mjpeg_manager = MJPEGStreamManager()
-
 # 🔥 수정: 통합된 ESP32 데이터 엔드포인트 (중복 제거)
 @app.post("/esp32/data")
 async def receive_esp32_data(request: Request, data: Dict[str, Any]):
@@ -531,121 +451,6 @@ def reconnect_redis():
 # ESP32 관련 엔드포인트
 # =========================
 
-@app.post("/video")
-async def receive_mjpeg_stream(request: Request):
-    """ESP Eye에서 MJPEG 스트림 수신 (Node.js 서버와 호환)"""
-    client_ip = request.client.host
-    print(f"🚀 ESP Eye MJPEG 연결: {client_ip}")
-    
-    try:
-        # ESP32 핸들러에 상태 업데이트
-        if MODULES_AVAILABLE and hasattr(esp32_handler, 'update_device_status'):
-            esp32_handler.update_device_status("esp_eye", client_ip)
-        
-        # 스트림 데이터 처리
-        async for chunk in request.stream():
-            if chunk:
-                # 🔥 모든 시청자에게 브로드캐스트
-                mjpeg_manager.broadcast_frame(chunk)
-                
-                # 🔥 선택사항: 개별 프레임 저장 (Redis)
-                if MODULES_AVAILABLE and len(chunk) > 1000:  # 최소 크기 체크
-                    try:
-                        # JPEG 헤더 확인
-                        if chunk.startswith(b'\xff\xd8\xff'):
-                            # Base64로 인코딩해서 기존 시스템에 저장
-                            import base64
-                            base64_data = base64.b64encode(chunk).decode('utf-8')
-                            
-                            # 기존 이미지 처리 시스템 활용
-                            image_data = {
-                                "image": base64_data,
-                                "source": "mjpeg_stream",
-                                "timestamp": get_korea_time().isoformat()
-                            }
-                            await esp32_handler.handle_esp_eye_data(image_data, client_ip)
-                    except Exception as e:
-                        print(f"⚠️ 프레임 저장 오류: {e}")
-        
-        print(f"📴 ESP Eye MJPEG 연결 해제: {client_ip}")
-        return JSONResponse({"status": "ok"})
-        
-    except Exception as e:
-        print(f"❌ MJPEG 스트림 처리 오류: {e}")
-        return JSONResponse({"status": "error", "message": str(e)})
-
-@app.get("/stream")
-async def mjpeg_stream_viewer():
-    """클라이언트용 MJPEG 스트림 (브라우저/VLC 호환)"""
-    
-    def generate_stream():
-        """MJPEG 스트림 생성기"""
-        frame_queue = mjpeg_manager.add_viewer()
-        
-        try:
-            # MJPEG 헤더
-            yield b"--frame\r\n"
-            
-            while True:
-                try:
-                    # 큐에서 프레임 대기 (5초 타임아웃)
-                    frame_data = frame_queue.get(timeout=5.0)
-                    yield frame_data
-                    
-                except queue.Empty:
-                    # 타임아웃 시 더미 프레임 또는 연결 유지 데이터
-                    print("⏰ 스트림 타임아웃 - 연결 유지")
-                    continue
-                    
-                except Exception as e:
-                    print(f"❌ 스트림 생성 오류: {e}")
-                    break
-        
-        finally:
-            # 시청자 정리
-            mjpeg_manager.remove_viewer(frame_queue)
-    
-    return StreamingResponse(
-        generate_stream(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-            "Connection": "keep-alive"
-        }
-    )
-
-@app.get("/stream/status")
-def get_stream_status():
-    """MJPEG 스트리밍 상태 조회"""
-    stats = mjpeg_manager.get_stats()
-    
-    return {
-        "status": "active" if stats["viewers"] > 0 or stats["esp_eye_connected"] else "inactive",
-        "viewers": stats["viewers"],
-        "frame_count": stats["frame_count"],
-        "last_frame_time": stats["last_frame_time"],
-        "last_frame_age_seconds": stats["last_frame_age"],
-        "esp_eye_connected": stats["esp_eye_connected"],
-        "stream_url": "/stream",
-        "timestamp": get_korea_time().isoformat()
-    }
-
-@app.get("/app/stream/url")
-def get_app_stream_url():
-    """앱용 스트림 URL 조회 (기존 API와 호환)"""
-    stats = mjpeg_manager.get_stats()
-    
-    return {
-        "status": "success",
-        "stream_url": "/stream",  # FastAPI 서버의 스트림 엔드포인트
-        "viewers": stats["viewers"],
-        "streaming_active": stats["esp_eye_connected"],
-        "frame_count": stats["frame_count"],
-        "timestamp": get_korea_time().isoformat()
-    }
-
 @app.post("/esp32/command")
 async def send_command_to_esp32(command_data: Dict[str, Any]):
     """ESP32에 WiFi로 명령 전송"""
@@ -852,7 +657,7 @@ def get_test_page():
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def baby_monitor_dashboard():
-    """아기 모니터링 실시간 대시보드 (MJPEG 스트리밍 통합)"""
+    """아기 모니터링 실시간 대시보드"""
     
     # 현재 아기 모니터링 데이터 수집
     current_time = get_korea_time()
@@ -948,44 +753,11 @@ def baby_monitor_dashboard():
                 background: #000; 
                 border-radius: 15px; 
                 position: relative;
-                min-height: 400px;
+                min-height: 300px;
                 display: flex;
                 align-items: center;
                 justify-content: center;
-                overflow: hidden;
             }}
-            .stream-overlay {{ 
-                position: absolute; 
-                top: 10px; 
-                left: 10px; 
-                background: rgba(0,0,0,0.8); 
-                color: white; 
-                padding: 8px 12px; 
-                border-radius: 15px; 
-                font-size: 12px;
-                z-index: 10;
-            }}
-            .viewer-count {{ 
-                position: absolute; 
-                top: 10px; 
-                right: 10px; 
-                background: rgba(0,0,0,0.8); 
-                color: white; 
-                padding: 8px 12px; 
-                border-radius: 15px; 
-                font-size: 12px;
-                z-index: 10;
-            }}
-            .stream-status-indicator {{
-                display: inline-block;
-                width: 8px;
-                height: 8px;
-                border-radius: 50%;
-                margin-right: 5px;
-            }}
-            .status-online {{ background-color: #28a745; }}
-            .status-offline {{ background-color: #dc3545; }}
-            .status-loading {{ background-color: #ffc107; }}
             .status-badge {{ 
                 font-size: 1.1rem; 
                 padding: 8px 16px;
@@ -1012,22 +784,6 @@ def baby_monitor_dashboard():
                 right: 20px; 
                 z-index: 1000;
             }}
-            .stream-error {{
-                text-align: center;
-                color: white;
-                padding: 40px 20px;
-            }}
-            .stream-loading {{
-                text-align: center;
-                color: white;
-                padding: 40px 20px;
-            }}
-            .mjpeg-stream {{
-                width: 100%;
-                height: 100%;
-                object-fit: contain;
-                border-radius: 15px;
-            }}
         </style>
     </head>
     <body>
@@ -1037,9 +793,6 @@ def baby_monitor_dashboard():
             <div class="refresh-controls">
                 <button class="btn btn-primary btn-sm me-2" onclick="refreshData()">
                     <i class="bi bi-arrow-clockwise"></i> 새로고침
-                </button>
-                <button class="btn btn-outline-primary btn-sm me-2" onclick="toggleStreamMode()">
-                    <i class="bi bi-camera-video"></i> <span id="streamModeText">스트림 모드</span>
                 </button>
                 <div class="form-check form-switch d-inline-block">
                     <input class="form-check-input" type="checkbox" id="autoRefresh" checked>
@@ -1064,73 +817,33 @@ def baby_monitor_dashboard():
                 
                 <div class="row">
                     
-                    <!-- 🔥 메인 비디오/이미지 영역 (MJPEG 스트림 통합) -->
+                    <!-- 메인 비디오/이미지 영역 -->
                     <div class="col-lg-8 mb-4">
                         <div class="baby-card h-100">
                             <div class="card-header bg-primary text-white">
                                 <h5 class="mb-0">
                                     <i class="bi bi-camera-video"></i> 실시간 영상
                                     <span class="float-end">
-                                        <span class="stream-status-indicator status-loading" id="streamStatusIndicator"></span>
-                                        <span id="streamStatusText">연결 중...</span>
+                                        <span class="live-indicator"></span> LIVE
                                     </span>
                                 </h5>
                             </div>
                             <div class="card-body p-0">
                                 <div class="video-container" id="videoContainer">
-                                    
-                                    <!-- 🔥 MJPEG 스트림 뷰 -->
-                                    <div id="mjpegStreamView" style="width: 100%; height: 100%; position: relative;">
-                                        <img id="mjpegStream" 
-                                             src="/stream" 
-                                             alt="Live MJPEG Stream" 
-                                             class="mjpeg-stream"
-                                             onerror="handleStreamError()"
-                                             onload="handleStreamSuccess()">
-                                        
-                                        <!-- 스트림 상태 오버레이 -->
-                                        <div class="stream-overlay">
-                                            <span class="live-indicator"></span> LIVE STREAM
-                                        </div>
-                                        
-                                        <!-- 시청자 수 표시 -->
-                                        <div class="viewer-count">
-                                            <i class="bi bi-eye"></i> <span id="viewerCount">-</span>명 시청 중
-                                        </div>
+                                    <div class="text-center text-white" id="noImageView">
+                                        <i class="bi bi-camera baby-icon mb-3"></i>
+                                        <h5>실시간 영상 스트림</h5>
+                                        <p class="mb-3">ESP32-CAM 연결 대기 중...</p>
+                                        <button class="btn btn-outline-light" onclick="requestLatestImage()">
+                                            <i class="bi bi-image"></i> 최신 이미지 가져오기
+                                        </button>
                                     </div>
-                                    
-                                    <!-- 🔥 이미지 모드 뷰 (폴백) -->
-                                    <div id="imageView" style="display: none; width: 100%; height: 100%; position: relative;">
-                                        <img id="latestImage" src="" alt="최신 이미지" class="mjpeg-stream">
-                                        <div class="stream-overlay">
-                                            <i class="bi bi-image"></i> 최신 이미지
-                                        </div>
-                                        <div class="viewer-count">
+    
+                                    <!-- 🔥 새로 추가: 이미지 표시 영역 -->
+                                    <div id="imageView" style="display: none; width: 100%; height: 100%;">
+                                        <img id="latestImage" src="" alt="최신 이미지" style="width: 100%; height: 100%; object-fit: contain; border-radius: 15px;">
+                                        <div style="position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 5px 10px; border-radius: 10px; font-size: 12px;">
                                             <span id="imageTimestamp">--:--</span>
-                                        </div>
-                                    </div>
-                                    
-                                    <!-- 🔥 스트림 로딩 뷰 -->
-                                    <div id="streamLoadingView" class="stream-loading" style="display: none;">
-                                        <div class="spinner-border text-light mb-3" role="status">
-                                            <span class="visually-hidden">Loading...</span>
-                                        </div>
-                                        <h5>스트림 연결 중...</h5>
-                                        <p>ESP Eye 카메라와 연결을 시도하고 있습니다</p>
-                                    </div>
-                                    
-                                    <!-- 🔥 스트림 오류 뷰 -->
-                                    <div id="streamErrorView" class="stream-error" style="display: none;">
-                                        <i class="bi bi-camera-video-off baby-icon mb-3"></i>
-                                        <h5>스트림 연결 실패</h5>
-                                        <p class="mb-3">ESP Eye 카메라가 연결되지 않았습니다</p>
-                                        <div class="d-grid gap-2 col-6 mx-auto">
-                                            <button class="btn btn-outline-light" onclick="retryStream()">
-                                                <i class="bi bi-arrow-clockwise"></i> 다시 연결
-                                            </button>
-                                            <button class="btn btn-outline-info" onclick="switchToImageMode()">
-                                                <i class="bi bi-image"></i> 이미지 모드로 전환
-                                            </button>
                                         </div>
                                     </div>
                                 </div>
@@ -1139,36 +852,24 @@ def baby_monitor_dashboard():
                                 <div class="p-3 bg-light">
                                     <div class="row text-center">
                                         <div class="col-3">
-                                            <button class="btn btn-outline-primary btn-sm w-100" onclick="captureSnapshot()">
+                                            <button class="btn btn-outline-primary btn-sm w-100">
                                                 <i class="bi bi-camera"></i> 스냅샷
                                             </button>
                                         </div>
                                         <div class="col-3">
-                                            <button class="btn btn-outline-success btn-sm w-100" onclick="toggleRecording()">
-                                                <i class="bi bi-record-circle"></i> <span id="recordText">녹화</span>
+                                            <button class="btn btn-outline-success btn-sm w-100">
+                                                <i class="bi bi-record-circle"></i> 녹화
                                             </button>
                                         </div>
                                         <div class="col-3">
-                                            <button class="btn btn-outline-warning btn-sm w-100" onclick="toggleNightMode()">
+                                            <button class="btn btn-outline-warning btn-sm w-100">
                                                 <i class="bi bi-moon"></i> 야간모드
                                             </button>
                                         </div>
                                         <div class="col-3">
-                                            <button class="btn btn-outline-info btn-sm w-100" onclick="openFullscreen()">
+                                            <button class="btn btn-outline-info btn-sm w-100">
                                                 <i class="bi bi-fullscreen"></i> 전체화면
                                             </button>
-                                        </div>
-                                    </div>
-                                    
-                                    <!-- 스트림 상태 정보 -->
-                                    <div class="mt-2 d-flex justify-content-between align-items-center">
-                                        <small class="text-muted">
-                                            <span id="streamModeDisplay">MJPEG 스트림</span> | 
-                                            프레임: <span id="frameCount">0</span>
-                                        </small>
-                                        <div>
-                                            <span class="badge bg-secondary me-1" id="streamQuality">HD</span>
-                                            <span class="badge" id="connectionStatus">연결 중</span>
                                         </div>
                                     </div>
                                 </div>
@@ -1176,7 +877,7 @@ def baby_monitor_dashboard():
                         </div>
                     </div>
                     
-                    <!-- 아기 상태 정보 (기존과 동일) -->
+                    <!-- 아기 상태 정보 -->
                     <div class="col-lg-4 mb-4">
                         <div class="baby-card h-100">
                             <div class="card-header bg-success text-white">
@@ -1230,7 +931,7 @@ def baby_monitor_dashboard():
                     </div>
                 </div>
                 
-                <!-- 환경 데이터 & 활동 로그 (기존과 동일) -->
+                <!-- 환경 데이터 & 활동 로그 -->
                 <div class="row">
                     
                     <!-- 환경 센서 데이터 -->
@@ -1330,7 +1031,7 @@ def baby_monitor_dashboard():
                     </div>
                 </div>
                 
-                <!-- 빠른 통계 (기존과 동일) -->
+                <!-- 빠른 통계 -->
                 <div class="row">
                     <div class="col-12">
                         <div class="baby-card">
@@ -1377,202 +1078,56 @@ def baby_monitor_dashboard():
         
         <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
         <script>
-            // 🔥 스트리밍 관련 변수들
+            // 🔥 이미지 관련 변수들 추가
             let autoRefreshInterval;
             let imageRefreshInterval;
-            let streamStatsInterval;
-            let currentMode = 'stream'; // 'stream' 또는 'image'
-            let isRecording = false;
             let lastImageTimestamp = null;
-            let streamRetryCount = 0;
-            const maxRetryCount = 3;
     
             function refreshData() {{
                 window.location.reload();
             }}
     
-            // 🔥 MJPEG 스트림 관리 함수들
-            function handleStreamSuccess() {{
-                console.log('✅ MJPEG 스트림 연결 성공');
-                updateStreamStatus('online', 'LIVE');
-                document.getElementById('mjpegStreamView').style.display = 'block';
-                document.getElementById('streamErrorView').style.display = 'none';
-                document.getElementById('streamLoadingView').style.display = 'none';
-                streamRetryCount = 0;
-                
-                // 스트림 통계 업데이트 시작
-                startStreamStatsUpdate();
-            }}
-    
-            function handleStreamError() {{
-                console.log('❌ MJPEG 스트림 연결 실패');
-                updateStreamStatus('offline', '연결 실패');
-                
-                streamRetryCount++;
-                if (streamRetryCount < maxRetryCount) {{
-                    console.log(`🔄 스트림 재연결 시도 (${{streamRetryCount}}/${{maxRetryCount}})`);
-                    setTimeout(retryStream, 2000 * streamRetryCount); // 지수 백오프
-                }} else {{
-                    document.getElementById('mjpegStreamView').style.display = 'none';
-                    document.getElementById('streamErrorView').style.display = 'block';
-                    document.getElementById('streamLoadingView').style.display = 'none';
-                    
-                    // 이미지 모드로 자동 폴백 (옵션)
-                    setTimeout(() => {{
-                        if (confirm('스트림 연결에 실패했습니다. 이미지 모드로 전환하시겠습니까?')) {{
-                            switchToImageMode();
-                        }}
-                    }}, 3000);
-                }}
-            }}
-    
-            function retryStream() {{
-                console.log('🔄 스트림 재연결 시도');
-                updateStreamStatus('loading', '재연결 중...');
-                
-                document.getElementById('streamErrorView').style.display = 'none';
-                document.getElementById('streamLoadingView').style.display = 'block';
-                
-                const streamImg = document.getElementById('mjpegStream');
-                streamImg.src = '/stream?' + new Date().getTime(); // 캐시 방지
-            }}
-    
-            function updateStreamStatus(status, text) {{
-                const indicator = document.getElementById('streamStatusIndicator');
-                const statusText = document.getElementById('streamStatusText');
-                const connectionStatus = document.getElementById('connectionStatus');
-                
-                // 상태 표시기 업데이트
-                indicator.className = `stream-status-indicator status-${{status}}`;
-                statusText.textContent = text;
-                
-                // 연결 상태 배지 업데이트
-                switch(status) {{
-                    case 'online':
-                        connectionStatus.className = 'badge bg-success';
-                        connectionStatus.textContent = '연결됨';
-                        break;
-                    case 'offline':
-                        connectionStatus.className = 'badge bg-danger';
-                        connectionStatus.textContent = '연결 안됨';
-                        break;
-                    case 'loading':
-                        connectionStatus.className = 'badge bg-warning';
-                        connectionStatus.textContent = '연결 중';
-                        break;
-                }}
-            }}
-    
-            // 🔥 스트림 통계 업데이트
-            async function startStreamStatsUpdate() {{
-                if (streamStatsInterval) {{
-                    clearInterval(streamStatsInterval);
-                }}
-                
-                streamStatsInterval = setInterval(async () => {{
-                    try {{
-                        const response = await fetch('/stream/status');
-                        const data = await response.json();
-                        
-                        // 시청자 수 업데이트
-                        document.getElementById('viewerCount').textContent = data.viewers || 0;
-                        
-                        // 프레임 수 업데이트
-                        document.getElementById('frameCount').textContent = data.frame_count || 0;
-                        
-                        // ESP Eye 연결 상태 확인
-                        if (!data.esp_eye_connected && currentMode === 'stream') {{
-                            console.log('⚠️ ESP Eye 연결 끊김 감지');
-                            updateStreamStatus('offline', 'ESP Eye 연결 끊김');
-                        }}
-                        
-                    }} catch (error) {{
-                        console.error('📊 스트림 통계 업데이트 실패:', error);
-                    }}
-                }}, 5000);
-            }}
-    
-            // 🔥 모드 전환 함수들
-            function toggleStreamMode() {{
-                if (currentMode === 'stream') {{
-                    switchToImageMode();
-                }} else {{
-                    switchToStreamMode();
-                }}
-            }}
-    
-            function switchToStreamMode() {{
-                console.log('📺 스트림 모드로 전환');
-                currentMode = 'stream';
-                
-                document.getElementById('mjpegStreamView').style.display = 'block';
-                document.getElementById('imageView').style.display = 'none';
-                document.getElementById('streamModeText').textContent = '이미지 모드';
-                document.getElementById('streamModeDisplay').textContent = 'MJPEG 스트림';
-                
-                // 이미지 새로고침 중지
-                if (imageRefreshInterval) {{
-                    clearInterval(imageRefreshInterval);
-                }}
-                
-                // 스트림 재시작
-                retryStream();
-            }}
-    
-            function switchToImageMode() {{
-                console.log('🖼️ 이미지 모드로 전환');
-                currentMode = 'image';
-                
-                document.getElementById('mjpegStreamView').style.display = 'none';
-                document.getElementById('imageView').style.display = 'block';
-                document.getElementById('streamErrorView').style.display = 'none';
-                document.getElementById('streamLoadingView').style.display = 'none';
-                document.getElementById('streamModeText').textContent = '스트림 모드';
-                document.getElementById('streamModeDisplay').textContent = '이미지 모드';
-                
-                // 스트림 통계 업데이트 중지
-                if (streamStatsInterval) {{
-                    clearInterval(streamStatsInterval);
-                }}
-                
-                // 이미지 새로고침 시작
-                requestLatestImage();
-                setupImageAutoRefresh();
-                
-                updateStreamStatus('offline', '이미지 모드');
-            }}
-    
-            // 🔥 이미지 모드 함수들 (기존 코드 개선)
+            // 🔥 새로운 이미지 함수들
             async function requestLatestImage() {{
                 try {{
-                    console.log('📷 최신 이미지 요청 중...');
+                    console.log('최신 이미지 요청 중...');
         
                     const response = await fetch('/images/latest');
                     const data = await response.json();
         
+                    console.log('API 응답:', data);
+        
                     if (data.status === 'success' && data.has_image && data.image_base64) {{
+                        // Base64 데이터 검증
                         const base64Data = data.image_base64.trim();
             
                         if (base64Data.length > 0) {{
                             displayImage(base64Data, data.timestamp);
-                            console.log('✅ 이미지 로드 성공:', data.size + ' bytes');
+                            console.log('이미지 로드 성공:', data.size + ' bytes');
                         }} else {{
-                            console.log('⚠️ 빈 이미지 데이터');
+                            console.log('빈 이미지 데이터');
+                            showNoImageView();
                         }}
                     }} else {{
-                        console.log('⚠️ 이미지 없음:', data.message || 'Unknown error');
+                        console.log('이미지 없음:', data.message || 'Unknown error');
+                        showNoImageView();
                     }}
         
                 }} catch (error) {{
-                    console.error('❌ 이미지 요청 실패:', error);
+                    console.error('이미지 요청 실패:', error);
+                    showNoImageView();
                 }}
             }}
     
             function displayImage(base64Data, timestamp) {{
+                const imageView = document.getElementById('imageView');
+                const noImageView = document.getElementById('noImageView');
                 const latestImage = document.getElementById('latestImage');
                 const timestampElement = document.getElementById('imageTimestamp');
 
+                // 🔥 Base64 데이터 검증 및 설정
                 try {{
+                    // data:image/jpeg;base64, 접두사가 없다면 추가
                     let imageUrl;
                     if (base64Data.startsWith('data:')) {{
                         imageUrl = base64Data;
@@ -1580,117 +1135,53 @@ def baby_monitor_dashboard():
                         imageUrl = 'data:image/jpeg;base64,' + base64Data;
                     }}
         
+                    // 이미지 로드 테스트
                     const testImg = new Image();
                     testImg.onload = function() {{
-                        console.log('✅ 이미지 표시 성공:', testImg.width + 'x' + testImg.height);
+                        console.log('✅ 이미지 로드 성공:', testImg.width + 'x' + testImg.height);
                         latestImage.src = imageUrl;
             
+                        // 타임스탬프 설정
                         if (timestamp) {{
                             const date = new Date(timestamp);
                             timestampElement.textContent = date.toLocaleTimeString();
                             lastImageTimestamp = timestamp;
                         }}
+            
+                        // 뷰 전환
+                        noImageView.style.display = 'none';
+                        imageView.style.display = 'block';
                     }};
         
                     testImg.onerror = function() {{
-                        console.error('❌ 이미지 표시 실패');
+                        console.error('❌ 이미지 로드 실패');
+                        showNoImageView();
                     }};
         
                     testImg.src = imageUrl;
         
                 }} catch (error) {{
-                    console.error('❌ 이미지 처리 오류:', error);
+                    console.error('❌ 이미지 표시 오류:', error);
+                    showNoImageView();
                 }}
             }}
     
+            function showNoImageView() {{
+                const imageView = document.getElementById('imageView');
+                const noImageView = document.getElementById('noImageView');
+        
+                imageView.style.display = 'none';
+                noImageView.style.display = 'block';
+            }}
+    
+            // 🔥 자동 이미지 새로고침
             function setupImageAutoRefresh() {{
-                if (imageRefreshInterval) {{
-                    clearInterval(imageRefreshInterval);
-                }}
-                
+                // 5초마다 새 이미지 확인
                 imageRefreshInterval = setInterval(async () => {{
-                    if (currentMode === 'image') {{
-                        await requestLatestImage();
-                    }}
-                }}, 3000); // 3초마다 이미지 새로고침
+                    await requestLatestImage();
+                }}, 1000);
             }}
     
-            // 🔥 컨트롤 함수들
-            function captureSnapshot() {{
-                if (currentMode === 'stream') {{
-                    // 스트림에서 스냅샷 캡처
-                    const canvas = document.createElement('canvas');
-                    const img = document.getElementById('mjpegStream');
-                    canvas.width = img.naturalWidth || img.width;
-                    canvas.height = img.naturalHeight || img.height;
-                    
-                    const ctx = canvas.getContext('2d');
-                    ctx.drawImage(img, 0, 0);
-                    
-                    // 다운로드
-                    const link = document.createElement('a');
-                    link.download = `baby_monitor_snapshot_${{new Date().toISOString().slice(0,19).replace(/:/g,'-')}}.jpg`;
-                    link.href = canvas.toDataURL('image/jpeg', 0.9);
-                    link.click();
-                    
-                    console.log('📸 스냅샷 캡처 완료');
-                }} else {{
-                    // 이미지 모드에서는 현재 이미지 다운로드
-                    const img = document.getElementById('latestImage');
-                    const link = document.createElement('a');
-                    link.download = `baby_monitor_image_${{new Date().toISOString().slice(0,19).replace(/:/g,'-')}}.jpg`;
-                    link.href = img.src;
-                    link.click();
-                    
-                    console.log('📷 이미지 저장 완료');
-                }}
-            }}
-    
-            function toggleRecording() {{
-                isRecording = !isRecording;
-                const recordText = document.getElementById('recordText');
-                
-                if (isRecording) {{
-                    recordText.textContent = '중지';
-                    console.log('🔴 녹화 시작');
-                    // 실제 녹화 로직 구현 필요
-                }} else {{
-                    recordText.textContent = '녹화';
-                    console.log('⏹️ 녹화 중지');
-                }}
-            }}
-    
-            function toggleNightMode() {{
-                // ESP32에 야간모드 명령 전송
-                fetch('/esp32/command', {{
-                    method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ 
-                        command: 'night_mode', 
-                        params: {{ enable: true }} 
-                    }})
-                }})
-                .then(response => response.json())
-                .then(data => {{
-                    console.log('🌙 야간모드 토글:', data);
-                }})
-                .catch(error => {{
-                    console.error('❌ 야간모드 토글 실패:', error);
-                }});
-            }}
-    
-            function openFullscreen() {{
-                const videoContainer = document.getElementById('videoContainer');
-                if (videoContainer.requestFullscreen) {{
-                    videoContainer.requestFullscreen();
-                }} else if (videoContainer.webkitRequestFullscreen) {{
-                    videoContainer.webkitRequestFullscreen();
-                }} else if (videoContainer.msRequestFullscreen) {{
-                    videoContainer.msRequestFullscreen();
-                }}
-            }}
-    
-            // 🔥 기존 함수들
             function playLullaby() {{
                 fetch('/esp32/command', {{
                     method: 'POST',
@@ -1699,68 +1190,47 @@ def baby_monitor_dashboard():
                 }})
                 .then(response => response.json())
                 .then(data => {{
-                    alert('🎵 자장가 재생 명령을 전송했습니다!');
+                    alert('자장가 재생 명령을 전송했습니다!');
                 }})
                 .catch(error => {{
-                    alert('❌ 명령 전송 실패: ' + error.message);
+                    alert('명령 전송 실패: ' + error.message);
                 }});
             }}
             
             function sendAlert() {{
-                alert('🔔 알림이 모든 연결된 앱으로 전송되었습니다!');
+                alert('알림이 모든 연결된 앱으로 전송되었습니다!');
             }}
     
+            // 🔥 수정된 자동 새로고침 설정
             function setupAutoRefresh() {{
                 const checkbox = document.getElementById('autoRefresh');
         
                 if (checkbox.checked) {{
                     autoRefreshInterval = setInterval(() => {{
-                        // 전체 페이지 새로고침은 30초마다
                         refreshData();
-                    }}, 30000);
+                    }}, 30000); // 30초마다 새로고침
+            
+                    // 이미지 자동 새로고침도 시작
+                    setupImageAutoRefresh();
                 }} else {{
                     clearInterval(autoRefreshInterval);
+                    clearInterval(imageRefreshInterval);
                 }}
             }}
     
-            // 🔥 초기화
-            document.addEventListener('DOMContentLoaded', function() {{
-                console.log('🚀 Baby Monitor 대시보드 초기화');
-                
-                // 자동 새로고침 설정
-                document.getElementById('autoRefresh').addEventListener('change', setupAutoRefresh);
-                setupAutoRefresh();
-                
-                // 기본적으로 스트림 모드로 시작
-                updateStreamStatus('loading', '연결 중...');
-                
-                // 스트림 로드 이벤트 리스너 (실제 이미지 로드 후 호출)
-                const streamImg = document.getElementById('mjpegStream');
-                streamImg.addEventListener('load', handleStreamSuccess);
-                streamImg.addEventListener('error', handleStreamError);
-                
-                // 초기 연결 상태 확인
-                setTimeout(() => {{
-                    fetch('/stream/status')
-                        .then(response => response.json())
-                        .then(data => {{
-                            console.log('📊 초기 스트림 상태:', data);
-                            if (!data.esp_eye_connected) {{
-                                console.log('⚠️ ESP Eye 연결되지 않음 - 이미지 모드로 시작');
-                                switchToImageMode();
-                            }}
-                        }})
-                        .catch(error => {{
-                            console.log('⚠️ 스트림 상태 확인 실패 - 이미지 모드로 폴백');
-                            switchToImageMode();
-                        }});
-                }}, 2000);
-            }});
+            document.getElementById('autoRefresh').addEventListener('change', setupAutoRefresh);
+    
+            // 🔥 페이지 로드시 이미지 요청 추가
+            // 첫 이미지 로드
+            requestLatestImage();
+            // 페이지 로드시 자동 새로고침 시작
+            setupAutoRefresh();
         </script>
     </body>
     </html>
     """
     return HTMLResponse(content=html_content)
+
 @app.get("/report", response_class=HTMLResponse)
 def health_report():
     """시스템 상태 보고서 페이지"""
@@ -2111,7 +1581,7 @@ async def receive_esp32_data(data: Dict[str, Any]):
         print(f"❌ ESP32 데이터 수신 오류: {e}")
         raise HTTPException(status_code=500, detail=f"ESP32 data processing failed: {str(e)}")
 
-if __name__ == "__main__":
+""" if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
 
@@ -2123,4 +1593,4 @@ if __name__ == "__main__":
     print(f"🚀 서버 시작 중... 포트 {port}")
     print(f"📊 모듈 상태: {'사용 가능' if MODULES_AVAILABLE else '기본 모드'}")
     
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port) """
