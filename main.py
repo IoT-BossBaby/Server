@@ -125,13 +125,13 @@ class MJPEGStreamManager:
             self.stream_stats["last_frame_time"] = time.time()
             self.stream_stats["esp_eye_connected"] = True
             
-            # MJPEG 프레임 형식으로 구성
-            mjpeg_frame = (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n"
-                f"Content-Length: {len(frame_data)}\r\n\r\n".encode() +
-                frame_data + b"\r\n"
-            )
+            # 🔥 수정: MJPEG 프레임 형식으로 구성 (bytes만 사용)
+            boundary = b"--frame\r\n"
+            content_type = b"Content-Type: image/jpeg\r\n"
+            content_length = f"Content-Length: {len(frame_data)}\r\n\r\n".encode('utf-8')
+            frame_end = b"\r\n"
+            
+            mjpeg_frame = boundary + content_type + content_length + frame_data + frame_end
             
             # 모든 활성 스트림에 전송
             dead_queues = []
@@ -533,7 +533,7 @@ def reconnect_redis():
 
 @app.post("/video")
 async def receive_mjpeg_stream(request: Request):
-    """ESP Eye에서 MJPEG 스트림 수신 (Node.js 서버와 호환)"""
+    """ESP Eye에서 MJPEG 스트림 수신 (수정된 버전)"""
     client_ip = request.client.host
     print(f"🚀 ESP Eye MJPEG 연결: {client_ip}")
     
@@ -543,13 +543,16 @@ async def receive_mjpeg_stream(request: Request):
             esp32_handler.update_device_status("esp_eye", client_ip)
         
         # 스트림 데이터 처리
+        frame_count = 0
         async for chunk in request.stream():
-            if chunk:
+            if chunk and len(chunk) > 0:
+                frame_count += 1
+                
                 # 🔥 모든 시청자에게 브로드캐스트
                 mjpeg_manager.broadcast_frame(chunk)
                 
-                # 🔥 선택사항: 개별 프레임 저장 (Redis)
-                if MODULES_AVAILABLE and len(chunk) > 1000:  # 최소 크기 체크
+                # 🔥 선택사항: 주기적으로 개별 프레임 저장 (Redis)
+                if MODULES_AVAILABLE and len(chunk) > 1000 and frame_count % 30 == 0:  # 30프레임마다 한 번만
                     try:
                         # JPEG 헤더 확인
                         if chunk.startswith(b'\xff\xd8\xff'):
@@ -561,29 +564,35 @@ async def receive_mjpeg_stream(request: Request):
                             image_data = {
                                 "image": base64_data,
                                 "source": "mjpeg_stream",
-                                "timestamp": get_korea_time().isoformat()
+                                "timestamp": get_korea_time().isoformat(),
+                                "frame_number": frame_count
                             }
                             await esp32_handler.handle_esp_eye_data(image_data, client_ip)
                     except Exception as e:
                         print(f"⚠️ 프레임 저장 오류: {e}")
         
-        print(f"📴 ESP Eye MJPEG 연결 해제: {client_ip}")
-        return JSONResponse({"status": "ok"})
+        print(f"📴 ESP Eye MJPEG 연결 해제: {client_ip} (총 {frame_count}프레임 수신)")
+        
+        # 연결 해제 시 상태 업데이트
+        mjpeg_manager.stream_stats["esp_eye_connected"] = False
+        
+        return JSONResponse({"status": "ok", "frames_received": frame_count})
         
     except Exception as e:
         print(f"❌ MJPEG 스트림 처리 오류: {e}")
-        return JSONResponse({"status": "error", "message": str(e)})
+        mjpeg_manager.stream_stats["esp_eye_connected"] = False
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 @app.get("/stream")
 async def mjpeg_stream_viewer():
-    """클라이언트용 MJPEG 스트림 (브라우저/VLC 호환)"""
+    """클라이언트용 MJPEG 스트림 (수정된 버전)"""
     
     def generate_stream():
         """MJPEG 스트림 생성기"""
         frame_queue = mjpeg_manager.add_viewer()
         
         try:
-            # MJPEG 헤더
+            # 🔥 수정: 초기 MJPEG 헤더 (bytes로 통일)
             yield b"--frame\r\n"
             
             while True:
@@ -593,8 +602,10 @@ async def mjpeg_stream_viewer():
                     yield frame_data
                     
                 except queue.Empty:
-                    # 타임아웃 시 더미 프레임 또는 연결 유지 데이터
+                    # 타임아웃 시 keep-alive 프레임
                     print("⏰ 스트림 타임아웃 - 연결 유지")
+                    keep_alive = b"--frame\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n\r\n"
+                    yield keep_alive
                     continue
                     
                 except Exception as e:
@@ -612,7 +623,8 @@ async def mjpeg_stream_viewer():
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
             "Expires": "0",
-            "Connection": "keep-alive"
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*"
         }
     )
 
@@ -634,7 +646,7 @@ def get_stream_status():
 
 @app.get("/app/stream/url")
 def get_app_stream_url():
-    """앱용 스트림 URL 조회 (기존 API와 호환)"""
+    """앱용 스트림 URL 조회"""
     stats = mjpeg_manager.get_stats()
     
     return {
@@ -646,6 +658,210 @@ def get_app_stream_url():
         "timestamp": get_korea_time().isoformat()
     }
 
+# 🔥 ESP Eye 설정 가이드 (수정된 버전)
+@app.get("/stream/setup", response_class=HTMLResponse)
+def mjpeg_setup_guide():
+    """ESP Eye MJPEG 설정 가이드"""
+    
+    # 현재 서버 정보 가져오기
+    stats = mjpeg_manager.get_stats()
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>ESP Eye MJPEG 설정 가이드</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
+    </head>
+    <body>
+        <div class="container py-5">
+            <h1 class="text-center mb-4">📹 ESP Eye MJPEG 스트리밍 설정</h1>
+            
+            <div class="row">
+                <div class="col-lg-8 mx-auto">
+                    <div class="card mb-4">
+                        <div class="card-header bg-primary text-white">
+                            <h5><i class="bi bi-code"></i> ESP Eye Arduino 코드</h5>
+                        </div>
+                        <div class="card-body">
+                            <pre><code style="font-size: 12px;">
+#include "esp_camera.h"
+#include &lt;WiFi.h&gt;
+#include &lt;HTTPClient.h&gt;
+
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+const char* serverURL = "http://YOUR_SERVER_URL:8000/video";
+
+void setup() {{
+    Serial.begin(115200);
+    
+    // WiFi 연결
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {{
+        delay(1000);
+        Serial.println("WiFi 연결 중...");
+    }}
+    Serial.println("WiFi 연결됨: " + WiFi.localIP().toString());
+    
+    // 카메라 초기화 (ESP32-CAM 표준 설정)
+    camera_config_t config;
+    config.ledc_channel = LEDC_CHANNEL_0;
+    config.ledc_timer = LEDC_TIMER_0;
+    config.pin_d0 = Y2_GPIO_NUM;
+    config.pin_d1 = Y3_GPIO_NUM;
+    config.pin_d2 = Y4_GPIO_NUM;
+    config.pin_d3 = Y5_GPIO_NUM;
+    config.pin_d4 = Y6_GPIO_NUM;
+    config.pin_d5 = Y7_GPIO_NUM;
+    config.pin_d6 = Y8_GPIO_NUM;
+    config.pin_d7 = Y9_GPIO_NUM;
+    config.pin_xclk = XCLK_GPIO_NUM;
+    config.pin_pclk = PCLK_GPIO_NUM;
+    config.pin_vsync = VSYNC_GPIO_NUM;
+    config.pin_href = HREF_GPIO_NUM;
+    config.pin_sscb_sda = SIOD_GPIO_NUM;
+    config.pin_sscb_scl = SIOC_GPIO_NUM;
+    config.pin_pwdn = PWDN_GPIO_NUM;
+    config.pin_reset = RESET_GPIO_NUM;
+    config.xclk_freq_hz = 20000000;
+    config.pixel_format = PIXFORMAT_JPEG;
+    config.frame_size = FRAMESIZE_VGA;  // 640x480
+    config.jpeg_quality = 12;           // 0-63 (낮을수록 고품질)
+    config.fb_count = 2;                // 프레임 버퍼 개수
+    
+    esp_err_t err = esp_camera_init(&config);
+    if (err != ESP_OK) {{
+        Serial.printf("카메라 초기화 실패: 0x%x", err);
+        return;
+    }}
+    
+    Serial.println("카메라 초기화 완료!");
+}}
+
+void loop() {{
+    camera_fb_t * fb = esp_camera_fb_get();
+    if (!fb) {{
+        Serial.println("카메라 프레임 캡처 실패");
+        delay(100);
+        return;
+    }}
+    
+    // HTTP POST로 JPEG 데이터 전송
+    if (WiFi.status() == WL_CONNECTED) {{
+        HTTPClient http;
+        http.begin(serverURL);
+        http.addHeader("Content-Type", "image/jpeg");
+        
+        int httpResponseCode = http.POST(fb->buf, fb->len);
+        
+        if (httpResponseCode > 0) {{
+            // 성공
+        }} else {{
+            Serial.printf("전송 실패: %d\\n", httpResponseCode);
+        }}
+        
+        http.end();
+    }}
+    
+    esp_camera_fb_return(fb);
+    delay(66);  // 약 15fps (1000/15 = 66ms)
+}}
+                            </code></pre>
+                        </div>
+                    </div>
+                    
+                    <div class="card">
+                        <div class="card-header bg-success text-white">
+                            <h5><i class="bi bi-info-circle"></i> 현재 스트림 상태</h5>
+                        </div>
+                        <div class="card-body">
+                            <div id="currentStatus">로딩 중...</div>
+                            <div class="mt-3">
+                                <a href="/stream" class="btn btn-primary" target="_blank">
+                                    <i class="bi bi-play-circle"></i> 스트림 보기
+                                </a>
+                                <a href="/dashboard" class="btn btn-outline-success">
+                                    <i class="bi bi-speedometer2"></i> 대시보드
+                                </a>
+                                <a href="/stream/status" class="btn btn-outline-info" target="_blank">
+                                    <i class="bi bi-code-square"></i> 상태 JSON
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <script>
+        async function updateStatus() {{
+            try {{
+                const response = await fetch('/stream/status');
+                const data = await response.json();
+                
+                document.getElementById('currentStatus').innerHTML = `
+                    <div class="row">
+                        <div class="col-md-6">
+                            <ul class="list-group">
+                                <li class="list-group-item d-flex justify-content-between">
+                                    <span><i class="bi bi-activity"></i> 스트림 상태</span>
+                                    <span class="badge bg-${{data.status === 'active' ? 'success' : 'secondary'}}">${{data.status}}</span>
+                                </li>
+                                <li class="list-group-item d-flex justify-content-between">
+                                    <span><i class="bi bi-eye"></i> 현재 시청자</span>
+                                    <span class="badge bg-info">${{data.viewers}}명</span>
+                                </li>
+                                <li class="list-group-item d-flex justify-content-between">
+                                    <span><i class="bi bi-camera"></i> ESP Eye 연결</span>
+                                    <span class="badge bg-${{data.esp_eye_connected ? 'success' : 'danger'}}">
+                                        ${{data.esp_eye_connected ? '연결됨' : '연결 안됨'}}
+                                    </span>
+                                </li>
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <ul class="list-group">
+                                <li class="list-group-item d-flex justify-content-between">
+                                    <span><i class="bi bi-layers"></i> 총 프레임</span>
+                                    <span class="badge bg-secondary">${{data.frame_count || 0}}</span>
+                                </li>
+                                <li class="list-group-item d-flex justify-content-between">
+                                    <span><i class="bi bi-clock"></i> 마지막 프레임</span>
+                                    <small class="text-muted">
+                                        ${{data.last_frame_time ? new Date(data.last_frame_time * 1000).toLocaleTimeString() : 'N/A'}}
+                                    </small>
+                                </li>
+                                <li class="list-group-item d-flex justify-content-between">
+                                    <span><i class="bi bi-link"></i> 스트림 URL</span>
+                                    <code>/stream</code>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                `;
+                
+            }} catch (error) {{
+                document.getElementById('currentStatus').innerHTML = 
+                    '<div class="alert alert-danger"><i class="bi bi-exclamation-triangle"></i> 상태 조회 실패: ' + error.message + '</div>';
+            }}
+        }}
+        
+        // 페이지 로드 시 상태 확인
+        updateStatus();
+        
+        // 5초마다 상태 업데이트
+        setInterval(updateStatus, 5000);
+        </script>
+    </body>
+    </html>
+    """
+    
+    return HTMLResponse(content=html_content)
+    
 @app.post("/esp32/command")
 async def send_command_to_esp32(command_data: Dict[str, Any]):
     """ESP32에 WiFi로 명령 전송"""
